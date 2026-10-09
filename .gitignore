@@ -1,0 +1,10 @@
+/.gradle/
+/build/
+**/build/
+local.properties
+*.jks
+*.keystore
+*.m4a
+*.wav
+*.epub
+.idea/
