@@ -286,7 +286,7 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            "${currentStep + 1}단계 / 4단계 (약 10초)",
+                            "${currentStep + 1}단계 / ${totalSteps}단계 (약 10초)",
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -442,60 +442,70 @@ class MainActivity : ComponentActivity() {
                     Text(trainingStepDesc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-        } else if (currentProfile.isTrained) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-            ) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("✅ ${currentProfile.roleLabel} 뉴럴 AI 목소리 학습 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
-                    Text("• ${currentProfile.roleLabel} 고유 음색과 F0 피치(${"%.2f".format(currentProfile.pitch)}x) 분석 완료", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
-                    Text("• 학습 음성 길이: 약 ${currentProfile.sampleDurationSec.toInt()}초 (${currentProfile.clipsCount}개 클립)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(onClick = { testTrainedVoice() }, enabled = !recording && !isTraining) {
-                            Text("🎧 테스트")
-                        }
-                        Button(
-                            onClick = { openVoiceTuningDialog() },
-                            enabled = !recording && !isTraining,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7))
-                        ) {
-                            Text("🎛️ 음색 튜닝")
-                        }
-                        OutlinedButton(onClick = { startVoiceTraining() }, enabled = !recording && !isTraining) {
-                            Text("다시 학습하기")
-                        }
-                    }
-                }
-            }
         } else {
+            val recordedCount = stepRecorded.count { it }
+            val canTrain = hasRecording || recordedCount >= 4
+            val trainButtonText = when {
+                recordedCount == totalSteps && currentProfile.isTrained -> "🚀 8단계 정밀 OpenVoice AI 재학습 시작"
+                recordedCount == totalSteps -> "🚀 8단계 정밀 OpenVoice AI 학습 시작"
+                currentProfile.isTrained -> "🚀 ${recordedCount}단계 OpenVoice AI 재학습 시작"
+                recordedCount >= 4 -> "🚀 ${recordedCount}단계 OpenVoice AI 학습 시작"
+                else -> "🚀 최소 4문장 이상 녹음 후 AI 학습 가능 (현재 ${recordedCount}/$totalSteps)"
+            }
+
             Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (currentProfile.isTrained) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                ),
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
             ) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("⚡ ${speakerRole.label} OpenVoice 딥러닝 보이스 클로닝", style = MaterialTheme.typography.titleMedium)
-                    val recordedCount = stepRecorded.count { it }
-                    val canTrain = hasRecording || recordedCount >= 4
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (currentProfile.isTrained) {
+                        Text("✅ ${currentProfile.roleLabel} OpenVoice 뉴럴 AI 모델 준비 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
+                        Text("• 현재 적용된 음성: ${currentProfile.clipsCount}개 문장 반영 (약 ${currentProfile.sampleDurationSec.toInt()}초)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
+                    } else {
+                        Text("⚡ ${speakerRole.label} OpenVoice 딥러닝 보이스 클로닝", style = MaterialTheme.typography.titleMedium)
+                    }
+
                     Text(
-                        if (recordedCount == totalSteps)
-                            "🌟 8단계 전체 문장(약 1분 30초) 녹음 완료! 최고 정밀도로 OpenVoice 뉴럴 AI 학습을 진행합니다."
-                        else if (recordedCount >= 4)
-                            "💡 현재 ${recordedCount}단계 녹음 완료! 지금 바로 OpenVoice 학습이 가능하며, 8단계까지 채우시면 음색이 더욱 정교해집니다."
-                        else
-                            "최소 4단계 이상 문장을 녹음하시면 무료 OpenVoice 뉴럴 AI 학습을 시작할 수 있습니다. (현재 ${recordedCount}/$totalSteps 단계)",
+                        when {
+                            recordedCount == totalSteps -> "🌟 8단계 전체 문장(약 1분 30초) 준비 완료! 아래 버튼을 누르면 8단계 전체 음색 벡터를 결합하여 가장 정교한 OpenVoice 모델을 생성합니다."
+                            recordedCount >= 4 -> "💡 현재 ${recordedCount}/8단계 녹음됨! 지금 바로 OpenVoice 학습이 가능하며, 나머지 문장도 추가 녹음하시면 음색이 더욱 닮아집니다."
+                            else -> "위의 1~8단계 중 최소 4단계 이상 문장을 녹음하시면 무료 OpenVoice 뉴럴 AI 학습을 시작할 수 있습니다. (현재 ${recordedCount}/$totalSteps 단계)"
+                        },
                         style = MaterialTheme.typography.bodySmall
                     )
-                    Spacer(Modifier.height(8.dp))
+
                     Button(
                         onClick = { startVoiceTraining() },
-                        enabled = canTrain && !recording && !isTraining
+                        enabled = canTrain && !recording && !isTraining,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = if (canTrain) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary)
                     ) {
-                        Text(if (recordedCount == totalSteps) "🚀 8단계 정밀 OpenVoice AI 학습 시작" else "🚀 ${recordedCount}단계 OpenVoice AI 학습 시작")
+                        Text(trainButtonText, style = MaterialTheme.typography.labelLarge)
+                    }
+
+                    if (currentProfile.isTrained) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { testTrainedVoice() },
+                                enabled = !recording && !isTraining,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("🎧 테스트 듣기")
+                            }
+                            Button(
+                                onClick = { openVoiceTuningDialog() },
+                                enabled = !recording && !isTraining,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7)),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("🎛️ 음색 튜닝")
+                            }
+                        }
                     }
                 }
             }
