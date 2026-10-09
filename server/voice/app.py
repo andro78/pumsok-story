@@ -143,7 +143,13 @@ async def train_speaker(
     # Pre-synthesize preview audio
     preview_mp3 = os.path.join(CACHE_DIR, f"preview_{speakerId}.mp3")
     preview_text = f"사랑하는 우리 아이야, {role_label}가 들려주는 재미있는 동화 나라로 함께 가보자."
-    engine.synthesize_cloned_voice(preview_text, profile, ref_wav, preview_mp3)
+    try:
+        engine.synthesize_cloned_voice(preview_text, profile, ref_wav, preview_mp3)
+    except Exception as e:
+        print(f"Preview synthesis error in train_speaker: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"음성 미리듣기 생성 중 오류 발생: {str(e)}")
 
     return {
         "status": "success",

@@ -235,15 +235,15 @@ def synthesize_cloned_voice(text: str, profile: dict, reference_wav: str, output
     os.makedirs(os.path.dirname(output_mp3), exist_ok=True)
 
     # 1. Check ElevenLabs API Key
-    eleven_key = profile.get("elevenLabsApiKey") or os.getenv("ELEVENLABS_API_KEY", "").strip()
-    voice_id = profile.get("elevenLabsVoiceId", "").strip()
+    eleven_key = (profile.get("elevenLabsApiKey") or os.getenv("ELEVENLABS_API_KEY", "") or "").strip()
+    voice_id = (profile.get("elevenLabsVoiceId") or "").strip()
 
     if eleven_key:
         if not voice_id and os.path.exists(reference_wav):
             try:
                 voice_id = clone_elevenlabs_voice(
-                    speaker_id=profile.get("speakerId", "speaker"),
-                    role_label=profile.get("roleLabel", "부모님"),
+                    speaker_id=str(profile.get("speakerId") or "speaker"),
+                    role_label=str(profile.get("roleLabel") or "부모님"),
                     wav_path=reference_wav,
                     api_key=eleven_key
                 )
@@ -261,10 +261,10 @@ def synthesize_cloned_voice(text: str, profile: dict, reference_wav: str, output
 
     # 2. Server-side Base Neural TTS
     raw_tts_mp3 = output_mp3 + ".base.mp3"
-    f0 = profile.get("f0MedianHz", 180.0)
-    role = str(profile.get("roleKey", "MOTHER")).upper()
-    pitch_offset_user = profile.get("pitchOffsetHz", 0)
-    user_speed = profile.get("speedRate", "")
+    f0 = float(profile.get("f0MedianHz") or 180.0)
+    role = str(profile.get("roleKey") or "MOTHER").upper()
+    pitch_offset_user = float(profile.get("pitchOffsetHz") or 0)
+    user_speed = str(profile.get("speedRate") or "").strip()
 
     if "FATHER" in role:
         base_voice = "ko-KR-InJoonNeural"
@@ -312,7 +312,7 @@ def synthesize_cloned_voice(text: str, profile: dict, reference_wav: str, output
     if converter is not None and kr_se is not None and os.path.exists(se_path):
         try:
             tgt_se = torch.load(se_path, map_location="cpu")
-            tau = float(profile.get("tau", 0.22))  # Tone color transfer strength (0.15~0.35)
+            tau = float(profile.get("tau") if profile.get("tau") is not None else 0.22)  # Tone color transfer strength (0.15~0.35)
             converter.convert(
                 audio_src_path=raw_tts_mp3,
                 src_se=kr_se,
@@ -328,11 +328,11 @@ def synthesize_cloned_voice(text: str, profile: dict, reference_wav: str, output
     input_audio_for_eq = converted_wav if used_openvoice else raw_tts_mp3
 
     # 4. Parametric Acoustic Polishing & Resonance Matching
-    warmth_db = float(profile.get("warmthDb", 1.8))
-    presence_db = float(profile.get("presenceDb", -0.5))
+    warmth_db = float(profile.get("warmthDb") if profile.get("warmthDb") is not None else 1.8)
+    presence_db = float(profile.get("presenceDb") if profile.get("presenceDb") is not None else -0.5)
 
     # Spectral balance compensation
-    low_ratio = profile.get("spectralLowRatio", 0.33)
+    low_ratio = float(profile.get("spectralLowRatio") if profile.get("spectralLowRatio") is not None else 0.33)
     extra_chest_boost = 1.5 if low_ratio > 0.4 else 0.0
 
     eq_filters = [
