@@ -39,6 +39,26 @@ class MainActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
     private val voiceFile get() = File(filesDir, "parent.m4a")
 
+    enum class SpeakerRole(val label: String) { MOTHER("엄마"), FATHER("아빠") }
+
+    private var speakerRole by mutableStateOf(SpeakerRole.MOTHER)
+    private var recordingStepMode by mutableStateOf(true)
+    private var currentStep by mutableIntStateOf(0)
+    private var stepRecorded by mutableStateOf(listOf(false, false, false, false))
+
+    private fun getStepScript(step: Int, role: SpeakerRole): String = when (step) {
+        0 -> "우리 아가, 오늘 하루도 재미있게 잘 보냈니?"
+        1 -> "창밖으로 별들이 반짝이고, 달님이 은은하게 미소를 짓는 밤이야."
+        2 -> "${role.label}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 여행을 떠나보자."
+        3 -> "이제 편안하게 눈을 감으면, 숲속 친구들의 재미있는 이야기가 시작될 거야."
+        else -> ""
+    }
+
+    private fun getFullDefaultScript(role: SpeakerRole): String =
+        (0..3).joinToString(" ") { getStepScript(it, role) }
+
+    private fun stepVoiceFile(step: Int) = File(filesDir, "voice_step_$step.m4a")
+
     private val microphone = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         if (it && consent) startRecording() else message = "녹음하려면 마이크 권한과 동의가 필요합니다."
     }
@@ -77,8 +97,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         updater.checkOnLaunch()
-        transcript = prefs.getString("transcript", "") ?: ""
+        val savedRole = prefs.getString("role", "MOTHER") ?: "MOTHER"
+        speakerRole = if (savedRole == "FATHER") SpeakerRole.FATHER else SpeakerRole.MOTHER
+        stepRecorded = (0..3).map { stepVoiceFile(it).exists() }
         hasRecording = voiceFile.exists()
+        transcript = prefs.getString("transcript", "") ?: ""
+        if (transcript.isBlank()) {
+            transcript = getFullDefaultScript(speakerRole)
+        }
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val result = tts?.setLanguage(Locale.KOREAN)
@@ -140,27 +166,174 @@ class MainActivity : ComponentActivity() {
         }
         HorizontalDivider(Modifier.padding(vertical = 16.dp))
         Text("부모님 목소리 등록", style = MaterialTheme.typography.titleLarge)
-        Text("조용한 곳에서 아래 대본을 직접 읽어주세요. 녹음은 이 기기에 저장됩니다.")
-        Row {
+        Text("아이에게 들려줄 목소리를 10초씩 편안하게 나누어 녹음해 보세요.")
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+            FilterChip(
+                selected = speakerRole == SpeakerRole.MOTHER,
+                onClick = {
+                    speakerRole = SpeakerRole.MOTHER
+                    prefs.edit().putString("role", "MOTHER").apply()
+                    if (transcript.isBlank() || transcript == getFullDefaultScript(SpeakerRole.FATHER)) {
+                        transcript = getFullDefaultScript(SpeakerRole.MOTHER)
+                    }
+                },
+                label = { Text("엄마 목소리") },
+                enabled = !recording
+            )
+            FilterChip(
+                selected = speakerRole == SpeakerRole.FATHER,
+                onClick = {
+                    speakerRole = SpeakerRole.FATHER
+                    prefs.edit().putString("role", "FATHER").apply()
+                    if (transcript.isBlank() || transcript == getFullDefaultScript(SpeakerRole.MOTHER)) {
+                        transcript = getFullDefaultScript(SpeakerRole.FATHER)
+                    }
+                },
+                label = { Text("아빠 목소리") },
+                enabled = !recording
+            )
+        }
+
+        Row(modifier = Modifier.padding(vertical = 4.dp)) {
             Checkbox(consent, onCheckedChange = { consent = it }, enabled = !recording)
             Text("내 목소리이거나, 녹음하는 부모님의 동의를 받았습니다.", Modifier.padding(top = 12.dp))
         }
-        OutlinedTextField(transcript, onValueChange = {
-            transcript = it
-            prefs.edit().putString("transcript", it).apply()
-        }, label = { Text("녹음에서 읽을 대본") }, enabled = !recording, modifier = Modifier.fillMaxWidth())
-        Button(onClick = {
-            if (recording) finishRecording()
-            else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
-            else microphone.launch(Manifest.permission.RECORD_AUDIO)
-        }, enabled = recording || (consent && transcript.isNotBlank())) { Text(if (recording) "녹음 종료" else "녹음 시작") }
-        Row {
-            TextButton(onClick = { playReference() }, enabled = hasRecording && !recording) { Text("녹음 듣기") }
-            TextButton(onClick = {
-                player?.release(); player = null
-                voiceFile.delete(); hasRecording = false
-                prefs.edit().remove("transcript").apply(); transcript = ""
-            }, enabled = hasRecording && !recording) { Text("녹음 삭제") }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 12.dp)) {
+            FilterChip(
+                selected = recordingStepMode,
+                onClick = { recordingStepMode = true },
+                label = { Text("4단계 나누어 녹음 (추천 · 10초씩)") },
+                enabled = !recording
+            )
+            FilterChip(
+                selected = !recordingStepMode,
+                onClick = { recordingStepMode = false },
+                label = { Text("한 번에 녹음 (자유 대본)") },
+                enabled = !recording
+            )
+        }
+
+        if (recordingStepMode) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "${currentStep + 1}단계 / 4단계 (약 10초)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        val isDone = stepRecorded.getOrElse(currentStep) { false }
+                        Text(
+                            if (isDone) "✓ 녹음 완료" else "대기 중",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isDone) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Text(
+                        text = "“${getStepScript(currentStep, speakerRole)}”",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 12.dp)) {
+                        (0..3).forEach { stepIndex ->
+                            val done = stepRecorded.getOrElse(stepIndex) { false }
+                            val isCurrent = stepIndex == currentStep
+                            OutlinedButton(
+                                onClick = { if (!recording) currentStep = stepIndex },
+                                colors = if (isCurrent) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                enabled = !recording
+                            ) {
+                                Text("${stepIndex + 1}단계 ${if (done) "✓" else ""}")
+                            }
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                if (recording) finishRecording()
+                                else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
+                                else microphone.launch(Manifest.permission.RECORD_AUDIO)
+                            },
+                            enabled = consent,
+                            colors = if (recording) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors()
+                        ) {
+                            Text(if (recording) "녹음 종료" else if (stepRecorded.getOrElse(currentStep) { false }) "다시 녹음하기" else "이 문장 녹음 시작")
+                        }
+
+                        if (stepRecorded.getOrElse(currentStep) { false } && !recording) {
+                            OutlinedButton(onClick = { playFile(stepVoiceFile(currentStep)) }) {
+                                Text("들어보기")
+                            }
+                        }
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+                    ) {
+                        TextButton(
+                            onClick = { currentStep = (currentStep - 1).coerceAtLeast(0) },
+                            enabled = currentStep > 0 && !recording
+                        ) {
+                            Text("← 이전 문장")
+                        }
+                        TextButton(
+                            onClick = { currentStep = (currentStep + 1).coerceAtMost(3) },
+                            enabled = currentStep < 3 && !recording
+                        ) {
+                            Text("다음 문장 →")
+                        }
+                    }
+                }
+            }
+
+            if (hasRecording) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 4.dp)) {
+                    Button(onClick = { playFile(voiceFile) }, enabled = !recording) {
+                        Text("전체 목소리 듣기 (약 40초)")
+                    }
+                    TextButton(onClick = { resetAllRecordings() }, enabled = !recording) {
+                        Text("전체 삭제")
+                    }
+                }
+            }
+        } else {
+            OutlinedTextField(
+                transcript,
+                onValueChange = {
+                    transcript = it
+                    prefs.edit().putString("transcript", it).apply()
+                },
+                label = { Text("녹음에서 읽을 대본") },
+                enabled = !recording,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = {
+                    if (recording) finishRecording()
+                    else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
+                    else microphone.launch(Manifest.permission.RECORD_AUDIO)
+                },
+                enabled = recording || (consent && transcript.isNotBlank())
+            ) {
+                Text(if (recording) "녹음 종료" else "녹음 시작")
+            }
+            Row {
+                TextButton(onClick = { playFile(voiceFile) }, enabled = hasRecording && !recording) { Text("녹음 듣기") }
+                TextButton(onClick = { resetAllRecordings() }, enabled = hasRecording && !recording) { Text("녹음 삭제") }
+            }
         }
         Text("부모님 목소리 생성: 엔진 연결 준비 중", color = MaterialTheme.colorScheme.primary)
         if (message.isNotBlank()) Text(message, Modifier.padding(vertical = 8.dp))
@@ -221,7 +394,7 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     private fun startRecording() {
         tts?.stop(); player?.release(); player = null
-        val pending = File(filesDir, "voice.tmp")
+        val targetTmp = File(filesDir, "voice.tmp")
         val next = MediaRecorder()
         runCatching {
             next.setAudioSource(MediaRecorder.AudioSource.MIC)
@@ -229,10 +402,16 @@ class MainActivity : ComponentActivity() {
             next.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             next.setAudioSamplingRate(24000)
             next.setAudioEncodingBitRate(96000)
-            next.setOutputFile(pending.absolutePath)
+            next.setOutputFile(targetTmp.absolutePath)
             next.prepare(); next.start()
-        }.onSuccess { recorder = next; recording = true; message = "녹음 중입니다." }
-            .onFailure { next.release(); pending.delete(); message = "녹음을 시작하지 못했습니다." }
+        }.onSuccess {
+            recorder = next
+            recording = true
+            message = if (recordingStepMode) "${currentStep + 1}단계 녹음 중입니다…" else "녹음 중입니다…"
+        }.onFailure {
+            next.release(); targetTmp.delete()
+            message = "녹음을 시작하지 못했습니다."
+        }
     }
 
     private fun finishRecording() {
@@ -240,22 +419,64 @@ class MainActivity : ComponentActivity() {
         val pending = File(filesDir, "voice.tmp")
         runCatching {
             active.stop()
-            check(pending.renameTo(voiceFile))
-        }.onSuccess { hasRecording = true; message = "녹음을 저장했습니다." }
-            .onFailure { pending.delete(); message = "녹음이 너무 짧거나 저장에 실패했습니다." }
+            if (recordingStepMode) {
+                val target = stepVoiceFile(currentStep)
+                if (target.exists()) target.delete()
+                check(pending.renameTo(target))
+                val updated = stepRecorded.toMutableList()
+                updated[currentStep] = true
+                stepRecorded = updated
+
+                if (updated.all { it }) {
+                    val merged = AudioConcatenator.concatM4a((0..3).map { stepVoiceFile(it) }, voiceFile)
+                    if (merged) {
+                        hasRecording = true
+                        transcript = getFullDefaultScript(speakerRole)
+                        prefs.edit().putString("transcript", transcript).apply()
+                        message = "🎉 4개 문장(약 40초) 녹음이 완료되어 부모님 목소리로 등록되었습니다!"
+                    } else {
+                        message = "${currentStep + 1}단계는 저장되었으나 전체 병합에 실패했습니다."
+                    }
+                } else {
+                    message = "${currentStep + 1}단계 문장이 저장되었습니다."
+                    val nextStep = (currentStep + 1).coerceAtMost(3)
+                    if (!stepRecorded[nextStep]) currentStep = nextStep
+                }
+            } else {
+                if (voiceFile.exists()) voiceFile.delete()
+                check(pending.renameTo(voiceFile))
+                hasRecording = true
+                message = "녹음을 저장했습니다."
+            }
+        }.onFailure {
+            pending.delete()
+            message = "녹음이 너무 짧거나 저장에 실패했습니다."
+        }
         active.release(); recorder = null; recording = false
     }
 
-    private fun playReference() {
+    private fun playFile(file: File) {
+        if (!file.exists()) return
         player?.release()
         runCatching {
             MediaPlayer().also { p ->
                 player = p
-                p.setDataSource(voiceFile.absolutePath)
+                p.setDataSource(file.absolutePath)
                 p.setOnCompletionListener { it.release(); player = null }
                 p.prepare(); p.start()
             }
         }.onFailure { player?.release(); player = null; message = "녹음을 재생하지 못했습니다." }
+    }
+
+    private fun resetAllRecordings() {
+        player?.release(); player = null
+        voiceFile.delete()
+        (0..3).forEach { stepVoiceFile(it).delete() }
+        stepRecorded = listOf(false, false, false, false)
+        hasRecording = false
+        prefs.edit().remove("transcript").apply()
+        transcript = getFullDefaultScript(speakerRole)
+        message = "녹음이 삭제되었습니다."
     }
 
     override fun onResume() {
