@@ -77,15 +77,34 @@ object NeuralVoiceClient {
         )
     }
 
+    fun tuneOnServer(profile: VoiceProfile): Boolean = runCatching {
+        val speakerId = "speaker_${profile.roleKey.lowercase()}"
+        val url = URL("$BASE_URL/tune")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        conn.connectTimeout = 15000
+        conn.readTimeout = 45000
+
+        val apiKeyJson = if (profile.useElevenLabs && !profile.elevenLabsApiKey.isNullOrBlank()) {
+            escapeJson(profile.elevenLabsApiKey)
+        } else "null"
+
+        val body = """{"speakerId":"$speakerId","pitchOffsetHz":${profile.pitchOffsetHz},"tau":${profile.tau},"warmthDb":${profile.warmthDb},"presenceDb":${profile.presenceDb},"speedRate":"${profile.speedRate}","elevenLabsApiKey":$apiKeyJson}"""
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        conn.responseCode in 200..299
+    }.getOrDefault(false)
+
     fun synthesizeSpeech(
         text: String,
-        roleKey: String,
+        profile: VoiceProfile,
         cacheFile: File
     ): Boolean {
         if (cacheFile.exists() && cacheFile.length() > 500) return true
 
         return runCatching {
-            val speakerId = "speaker_${roleKey.lowercase()}"
+            val speakerId = "speaker_${profile.roleKey.lowercase()}"
             val url = URL("$BASE_URL/synthesize")
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
@@ -94,7 +113,7 @@ object NeuralVoiceClient {
             conn.connectTimeout = 15000
             conn.readTimeout = 45000
 
-            val body = """{"text":${escapeJson(text)},"speakerId":"$speakerId","role":"$roleKey"}"""
+            val body = """{"text":${escapeJson(text)},"speakerId":"$speakerId","role":"${profile.roleKey}","pitchOffsetHz":${profile.pitchOffsetHz},"tau":${profile.tau},"warmthDb":${profile.warmthDb},"speedRate":"${profile.speedRate}"}"""
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
             val code = conn.responseCode
@@ -109,6 +128,12 @@ object NeuralVoiceClient {
             true
         }.getOrDefault(false)
     }
+
+    fun synthesizeSpeech(
+        text: String,
+        roleKey: String,
+        cacheFile: File
+    ): Boolean = synthesizeSpeech(text, VoiceProfile.defaultFor(roleKey, if (roleKey == "MOTHER") "엄마" else "아빠"), cacheFile)
 
     fun downloadPreview(speakerId: String, targetFile: File): Boolean = runCatching {
         val url = URL("$BASE_URL/preview/$speakerId")

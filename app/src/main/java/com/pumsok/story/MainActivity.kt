@@ -58,6 +58,15 @@ class MainActivity : ComponentActivity() {
     private var trainingStepTitle by mutableStateOf("")
     private var trainingStepDesc by mutableStateOf("")
 
+    private var showVoiceTuningDialog by mutableStateOf(false)
+    private var tuningPitchOffset by mutableFloatStateOf(0f)
+    private var tuningTau by mutableFloatStateOf(0.22f)
+    private var tuningWarmth by mutableFloatStateOf(2.0f)
+    private var tuningSpeed by mutableStateOf("-6%")
+    private var tuningElevenKey by mutableStateOf("")
+    private var tuningUseEleven by mutableStateOf(false)
+    private var isTuningPreviewLoading by mutableStateOf(false)
+
     private var speakerRole by mutableStateOf(SpeakerRole.MOTHER)
     private var recordingStepMode by mutableStateOf(true)
     private var currentStep by mutableIntStateOf(0)
@@ -172,6 +181,9 @@ class MainActivity : ComponentActivity() {
                             Column(Modifier.weight(0.4f).verticalScroll(rememberScrollState())) { Controls() }
                             Column(Modifier.weight(0.6f).verticalScroll(rememberScrollState())) { Reader() }
                         } else Column(Modifier.verticalScroll(rememberScrollState())) { Controls(); Reader() }
+                    }
+                    if (showVoiceTuningDialog) {
+                        VoiceTuningDialog()
                     }
                 }
             }
@@ -410,9 +422,19 @@ class MainActivity : ComponentActivity() {
                     Text("• ${currentProfile.roleLabel} 고유 음색과 F0 피치(${"%.2f".format(currentProfile.pitch)}x) 분석 완료", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
                     Text("• 학습 음성 길이: 약 ${currentProfile.sampleDurationSec.toInt()}초 (${currentProfile.clipsCount}개 클립)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
                     Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Button(onClick = { testTrainedVoice() }, enabled = !recording && !isTraining) {
-                            Text("🎧 학습 목소리 테스트")
+                            Text("🎧 테스트")
+                        }
+                        Button(
+                            onClick = { openVoiceTuningDialog() },
+                            enabled = !recording && !isTraining,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7))
+                        ) {
+                            Text("🎛️ 음색 튜닝")
                         }
                         OutlinedButton(onClick = { startVoiceTraining() }, enabled = !recording && !isTraining) {
                             Text("다시 학습하기")
@@ -509,7 +531,11 @@ class MainActivity : ComponentActivity() {
                     Column(Modifier.padding(14.dp)) {
                         Text("❤️ ${currentProfile.roleLabel} 뉴럴 AI 목소리로 읽기", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
                         Text("${currentProfile.roleLabel}의 목소리 톤과 자연스러운 구연 억양을 입힌 뉴럴 AI 음성으로 동화를 읽어줍니다.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF33691E))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) {
                             Button(
                                 onClick = {
                                     readParagraphWithNeuralVoice(book.paragraphs[index], currentProfile)
@@ -517,6 +543,9 @@ class MainActivity : ComponentActivity() {
                                 enabled = !recording && !isTraining
                             ) {
                                 Text("❤️ ${currentProfile.roleLabel} AI 목소리로 읽기")
+                            }
+                            IconButton(onClick = { openVoiceTuningDialog() }) {
+                                Text("🎛️", fontSize = 18.sp)
                             }
                             if (hasRecording) {
                                 Button(
@@ -791,15 +820,13 @@ class MainActivity : ComponentActivity() {
         val profile = currentProfile
         val phrase = "사랑하는 우리 아이야, ${profile.roleLabel}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 가보자."
         val previewFile = File(cacheDir, "preview_${profile.roleKey.lowercase()}.mp3")
-        if (previewFile.exists() && previewFile.length() > 500) {
-            message = "🎧 ‘${profile.roleLabel}’ 뉴럴 AI 학습 목소리를 재생합니다."
-            playFile(previewFile)
-            return
-        }
 
         message = "✨ ${profile.roleLabel} 뉴럴 AI 목소리로 테스트 음성을 준비 중입니다…"
         executor.execute {
-            val ok = NeuralVoiceClient.synthesizeSpeech(phrase, profile.roleKey, previewFile)
+            var ok = NeuralVoiceClient.downloadPreview("speaker_${profile.roleKey.lowercase()}", previewFile)
+            if (!ok || !previewFile.exists()) {
+                ok = NeuralVoiceClient.synthesizeSpeech(phrase, profile, previewFile)
+            }
             runOnUiThread {
                 if (ok && previewFile.exists()) {
                     message = "🎧 ‘${profile.roleLabel}’ 뉴럴 AI 학습 목소리를 재생합니다."
@@ -814,21 +841,22 @@ class MainActivity : ComponentActivity() {
 
     private fun readParagraphWithNeuralVoice(text: String, profile: VoiceProfile) {
         stopAllAudio()
-        val hash = (profile.roleKey + ":" + text).hashCode().toString().replace("-", "n")
+        val tuningSig = "${profile.pitchOffsetHz}_${(profile.tau * 100).toInt()}_${(profile.warmthDb * 10).toInt()}_${profile.speedRate}"
+        val hash = (profile.roleKey + ":" + tuningSig + ":" + text).hashCode().toString().replace("-", "n")
         val cacheFile = File(cacheDir, "story_${profile.roleKey.lowercase()}_$hash.mp3")
 
         if (cacheFile.exists() && cacheFile.length() > 500) {
-            message = "❤️ ${profile.roleLabel} AI 목소리로 읽어줍니다."
+            message = "❤️ ${profile.roleLabel} 뉴럴 AI 목소리로 읽어줍니다."
             playFile(cacheFile)
             return
         }
 
         message = "✨ ${profile.roleLabel} 뉴럴 AI 목소리로 문장 생성 중…"
         executor.execute {
-            val ok = NeuralVoiceClient.synthesizeSpeech(text, profile.roleKey, cacheFile)
+            val ok = NeuralVoiceClient.synthesizeSpeech(text, profile, cacheFile)
             runOnUiThread {
                 if (ok && cacheFile.exists()) {
-                    message = "❤️ ${profile.roleLabel} AI 목소리로 읽어줍니다."
+                    message = "❤️ ${profile.roleLabel} 뉴럴 AI 목소리로 읽어줍니다."
                     playFile(cacheFile)
                 } else {
                     tts?.let { voiceEngine.speak(text, profile, it) }
@@ -836,6 +864,204 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun openVoiceTuningDialog() {
+        tuningPitchOffset = currentProfile.pitchOffsetHz.toFloat()
+        tuningTau = currentProfile.tau
+        tuningWarmth = currentProfile.warmthDb
+        tuningSpeed = currentProfile.speedRate
+        tuningElevenKey = currentProfile.elevenLabsApiKey ?: ""
+        tuningUseEleven = currentProfile.useElevenLabs
+        showVoiceTuningDialog = true
+    }
+
+    private fun previewTunedVoice() {
+        isTuningPreviewLoading = true
+        val tempProfile = currentProfile.copy(
+            pitchOffsetHz = tuningPitchOffset.toInt(),
+            tau = tuningTau,
+            warmthDb = tuningWarmth,
+            speedRate = tuningSpeed,
+            elevenLabsApiKey = tuningElevenKey.trim().takeIf { it.isNotBlank() },
+            useElevenLabs = tuningUseEleven
+        )
+        executor.execute {
+            NeuralVoiceClient.tuneOnServer(tempProfile)
+            val previewFile = File(cacheDir, "preview_${tempProfile.roleKey.lowercase()}.mp3")
+            val ok = NeuralVoiceClient.downloadPreview("speaker_${tempProfile.roleKey.lowercase()}", previewFile)
+            runOnUiThread {
+                isTuningPreviewLoading = false
+                if (ok && previewFile.exists()) {
+                    message = "🎧 튜닝된 ‘${tempProfile.roleLabel}’ 뉴럴 목소리를 재생합니다."
+                    playFile(previewFile)
+                } else {
+                    message = "미리듣기 생성에 실패했습니다."
+                }
+            }
+        }
+    }
+
+    private fun saveTunedVoice() {
+        val updatedProfile = currentProfile.copy(
+            pitchOffsetHz = tuningPitchOffset.toInt(),
+            tau = tuningTau,
+            warmthDb = tuningWarmth,
+            speedRate = tuningSpeed,
+            elevenLabsApiKey = tuningElevenKey.trim().takeIf { it.isNotBlank() },
+            useElevenLabs = tuningUseEleven
+        )
+        if (speakerRole == SpeakerRole.MOTHER) {
+            motherProfile = updatedProfile
+            prefs.edit().putString("profile_MOTHER", updatedProfile.toJson()).apply()
+        } else {
+            fatherProfile = updatedProfile
+            prefs.edit().putString("profile_FATHER", updatedProfile.toJson()).apply()
+        }
+        executor.execute {
+            NeuralVoiceClient.tuneOnServer(updatedProfile)
+        }
+        showVoiceTuningDialog = false
+        message = "✅ ${updatedProfile.roleLabel} 맞춤 음색 튜닝이 저장되었습니다."
+    }
+
+    @Composable
+    private fun VoiceTuningDialog() {
+        AlertDialog(
+            onDismissRequest = { showVoiceTuningDialog = false },
+            title = {
+                Text("🎛️ ${currentProfile.roleLabel} 목소리 맞춤 튜닝", style = MaterialTheme.typography.titleLarge)
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Text(
+                        "실제 부모님 목소리와 더욱 똑같아지도록 음높이, 음색 복제 강도, 울림을 미세 조절합니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // 1. Pitch
+                    Column {
+                        val pInt = tuningPitchOffset.toInt()
+                        val pDesc = if (pInt > 0) "+${pInt}Hz (더 맑고 높게)" else if (pInt < 0) "${pInt}Hz (더 낮고 묵직하게)" else "기본값 (0Hz)"
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("1. 음높이 미세 조절", style = MaterialTheme.typography.labelMedium)
+                            Text(pDesc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        }
+                        Slider(
+                            value = tuningPitchOffset,
+                            onValueChange = { tuningPitchOffset = it },
+                            valueRange = -40f..40f,
+                            steps = 15
+                        )
+                    }
+
+                    // 2. Tau (Neural Clone Resemblance)
+                    Column {
+                        val tauDesc = if (tuningTau >= 0.28f) "강한 복제 (고유 음색 강조)" else if (tuningTau <= 0.15f) "부드러운 음색 (자연스러움)" else "균형 잡힌 음색 (권장)"
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("2. 뉴럴 음색 복제 강도", style = MaterialTheme.typography.labelMedium)
+                            Text("${"%.2f".format(tuningTau)} - $tauDesc", style = MaterialTheme.typography.labelSmall, color = Color(0xFF673AB7))
+                        }
+                        Slider(
+                            value = tuningTau,
+                            onValueChange = { tuningTau = it },
+                            valueRange = 0.10f..0.45f
+                        )
+                    }
+
+                    // 3. Warmth / Resonance
+                    Column {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("3. 목소리 따뜻함 / 울림", style = MaterialTheme.typography.labelMedium)
+                            Text("${"%.1f".format(tuningWarmth)} dB", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
+                        }
+                        Slider(
+                            value = tuningWarmth,
+                            onValueChange = { tuningWarmth = it },
+                            valueRange = -3.0f..6.0f
+                        )
+                    }
+
+                    // 4. Speed
+                    Column {
+                        Text("4. 낭독 속도", style = MaterialTheme.typography.labelMedium)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf("-12%" to "느리게", "-6%" to "포근함", "+0%" to "보통", "+6%" to "빠르게").forEach { (speedVal, label) ->
+                                val isSelected = tuningSpeed == speedVal
+                                OutlinedButton(
+                                    onClick = { tuningSpeed = speedVal },
+                                    modifier = Modifier.weight(1f),
+                                    colors = if (isSelected) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primaryContainer) else ButtonDefaults.outlinedButtonColors(),
+                                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
+                                ) {
+                                    Text(label, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. ElevenLabs Option
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("초고화질 AI 복제 (ElevenLabs)", style = MaterialTheme.typography.labelMedium, color = Color(0xFFE65100))
+                                    Text("99% 실제 부모님 목소리와 동일한 음성 복제", style = MaterialTheme.typography.bodySmall, color = Color(0xFFBF360C))
+                                }
+                                Switch(
+                                    checked = tuningUseEleven,
+                                    onCheckedChange = { tuningUseEleven = it }
+                                )
+                            }
+                            if (tuningUseEleven) {
+                                OutlinedTextField(
+                                    value = tuningElevenKey,
+                                    onValueChange = { tuningElevenKey = it },
+                                    label = { Text("ElevenLabs API Key") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    placeholder = { Text("sk_...") }
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { saveTunedVoice() }) {
+                    Text("💾 저장 및 적용")
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { previewTunedVoice() },
+                        enabled = !isTuningPreviewLoading
+                    ) {
+                        Text(if (isTuningPreviewLoading) "생성 중…" else "🎧 미리듣기")
+                    }
+                    TextButton(onClick = { showVoiceTuningDialog = false }) {
+                        Text("닫기")
+                    }
+                }
+            }
+        )
     }
 
     private fun playFile(file: File, onComplete: (() -> Unit)? = null) {
