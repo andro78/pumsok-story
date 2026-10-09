@@ -45,4 +45,19 @@ class EpubReaderTest {
             assertEquals(1, EpubReader.read(file).paragraphs.count { it == "중첩 문단" })
         } finally { file.delete() }
     }
+
+    @Test fun readsBundledSampleEpubs() {
+        val sunMoon = File("src/main/assets/sun_and_moon.epub")
+        if (sunMoon.exists()) {
+            val story = EpubReader.read(sunMoon)
+            assertEquals("해와 달이 된 오누이", story.title)
+            assertEquals(22, story.paragraphs.size)
+        }
+        val rabbitTurtle = File("src/main/assets/rabbit_and_turtle.epub")
+        if (rabbitTurtle.exists()) {
+            val story = EpubReader.read(rabbitTurtle)
+            assertEquals("토끼와 거북이", story.title)
+            assertEquals(19, story.paragraphs.size)
+        }
+    }
 }

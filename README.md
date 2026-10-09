@@ -3,24 +3,31 @@
 
 ## 현재 범위
 - 화면 너비에 따른 단일/두 열 UI
-- DRM 없는 EPUB의 OPF spine 순서에 따른 본문 가져오기
+- DRM 없는 EPUB의 OPF spine 순서에 따른 본문 가져오기 및 기본 샘플 동화 2편 탑재
 - 앱 내부 EPUB 보관 및 마지막 책 다시 열기
 - 마이크 권한 요청, 부모님 참조 녹음과 대본 저장, 녹음 재생/삭제
 - 기본 Android TTS로 문단 낭독 및 읽던 문단 저장
+- 앱 시작 시 d32.org `version.json` 확인을 통한 자체 업데이트 및 직접 설치 (`Updater.kt`)
 - 음성 복제 엔진 인터페이스와 미지원 상태 표시
 
 **현재 기본 TTS는 부모님 목소리를 복제하지 않습니다.**
 부모님 음성 복제, 결제, 계정, 서버 동기화, 백그라운드 재생은 후속 구현입니다.
 본 버전은 내부 개발용이며 유료 출시용이 아닙니다. 녹음·책은 외부로 업로드하지 않습니다.
 
-## 빌드
+## 빌드 및 배포
 Android Studio에서 열고 JDK 17 / SDK 35를 설치합니다.
-Gradle 8.11.1을 설치한 환경에서:
+
 ```sh
-gradle testDebugUnitTest lintDebug assembleDebug
+# 테스트 및 디버그 빌드
+./gradlew testDebugUnitTest assembleDebug
+
+# 배포용 릴리스 패키지 생성 (APK & AAB)
+./gradlew assembleRelease bundleRelease
 ```
-GitHub Actions도 동일 명령으로 빌드하며 성공하면 debug APK를 제공합니다.
-현재 Gradle wrapper는 포함되지 않습니다. 검증한 Gradle로 `gradle wrapper`를 실행해 추가할 수 있습니다.
+
+- 산출물: `app/build/outputs/apk/release/app-release.apk`, `app/build/outputs/bundle/release/app-release.aab`
+- 배포 페이지: [d32.org 품속동화](https://d32.org/pumsok/) (APK 및 Play 업로드용 AAB 다운로드 제공)
+- 스토어 출시 문서: [`docs/play-store-release-guide.md`](file:///srv/nas/projects/pumsok-story/docs/play-store-release-guide.md)
 
 ## 기기 검증
 폰 세로/가로, 태블릿 및 분할 화면에서 확인합니다.

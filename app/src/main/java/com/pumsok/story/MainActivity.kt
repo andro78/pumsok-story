@@ -22,6 +22,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
+    private val updater by lazy { Updater(this) }
     private val executor = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences("reader", MODE_PRIVATE) }
     private var story by mutableStateOf<Story?>(null)
@@ -75,6 +76,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        updater.checkOnLaunch()
         transcript = prefs.getString("transcript", "") ?: ""
         hasRecording = voiceFile.exists()
         tts = TextToSpeech(this) { status ->
@@ -85,8 +87,19 @@ class MainActivity : ComponentActivity() {
         }
         executor.execute {
             val saved = File(filesDir, "book.epub")
-            if (saved.exists()) runCatching { EpubReader.read(saved) }.onSuccess { parsed ->
-                runOnUiThread { story = parsed; index = prefs.getInt("index", 0).coerceIn(parsed.paragraphs.indices) }
+            if (saved.exists()) {
+                runCatching { EpubReader.read(saved) }.onSuccess { parsed ->
+                    runOnUiThread { story = parsed; index = prefs.getInt("index", 0).coerceIn(parsed.paragraphs.indices) }
+                }
+            } else {
+                runCatching {
+                    assets.open("sun_and_moon.epub").use { input ->
+                        saved.outputStream().use { out -> input.copyTo(out) }
+                    }
+                    EpubReader.read(saved)
+                }.onSuccess { parsed ->
+                    runOnUiThread { story = parsed; index = 0; message = "기본 동화를 준비했습니다." }
+                }
             }
         }
         setContent {
@@ -109,8 +122,21 @@ class MainActivity : ComponentActivity() {
     @Composable private fun Controls() {
         Text("품속동화", style = MaterialTheme.typography.headlineLarge)
         Text("엄마 아빠 목소리로 들려주는 동화", modifier = Modifier.padding(vertical = 8.dp))
-        Button(onClick = { importBook.launch(arrayOf("application/epub+zip", "application/octet-stream")) }, enabled = !busy) {
-            Text(if (busy) "동화 불러오는 중…" else "EPUB 동화 가져오기")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { importBook.launch(arrayOf("application/epub+zip", "application/octet-stream")) }, enabled = !busy) {
+                Text(if (busy) "동화 불러오는 중…" else "내 EPUB 가져오기")
+            }
+            TextButton(onClick = { updater.checkOnLaunch(manual = true) }) {
+                Text("업데이트 확인")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+            OutlinedButton(onClick = { loadAssetStory("sun_and_moon.epub") }, enabled = !busy) {
+                Text("샘플: 해와 달")
+            }
+            OutlinedButton(onClick = { loadAssetStory("rabbit_and_turtle.epub") }, enabled = !busy) {
+                Text("샘플: 토끼와 거북이")
+            }
         }
         HorizontalDivider(Modifier.padding(vertical = 16.dp))
         Text("부모님 목소리 등록", style = MaterialTheme.typography.titleLarge)
@@ -165,6 +191,33 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putInt("index", index).apply()
     }
 
+    private fun loadAssetStory(assetName: String) {
+        busy = true
+        executor.execute {
+            val book = File(filesDir, "book.epub")
+            runCatching {
+                assets.open(assetName).use { input ->
+                    book.outputStream().use { out -> input.copyTo(out) }
+                }
+                EpubReader.read(book)
+            }.onSuccess { parsed ->
+                runOnUiThread {
+                    tts?.stop()
+                    story = parsed
+                    index = 0
+                    prefs.edit().putInt("index", 0).apply()
+                    message = "${parsed.title} 동화를 불러왔습니다."
+                    busy = false
+                }
+            }.onFailure { e ->
+                runOnUiThread {
+                    message = e.message ?: "동화 불러오기 실패"
+                    busy = false
+                }
+            }
+        }
+    }
+
     @Suppress("DEPRECATION")
     private fun startRecording() {
         tts?.stop(); player?.release(); player = null
@@ -205,6 +258,11 @@ class MainActivity : ComponentActivity() {
         }.onFailure { player?.release(); player = null; message = "녹음을 재생하지 못했습니다." }
     }
 
+    override fun onResume() {
+        super.onResume()
+        updater.onResume()
+    }
+
     override fun onStop() {
         if (recording) finishRecording()
         tts?.stop(); player?.release(); player = null
@@ -212,6 +270,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        updater.release()
         recorder?.release(); player?.release(); tts?.shutdown()
         executor.shutdown()
         super.onDestroy()

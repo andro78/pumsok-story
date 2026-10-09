@@ -7,4 +7,5 @@ local.properties
 *.m4a
 *.wav
 *.epub
+!app/src/main/assets/*.epub
 .idea/

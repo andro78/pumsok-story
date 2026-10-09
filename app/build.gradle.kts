@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,6 +16,23 @@ android {
         versionName = "0.1.0"
     }
     buildFeatures { compose = true }
+    val keystoreFile = rootProject.file("keystore.properties")
+    val uploadSigning = if (keystoreFile.exists()) {
+        val p = Properties().apply { keystoreFile.inputStream().use { load(it) } }
+        signingConfigs.create("upload") {
+            storeFile = file(p.getProperty("storeFile"))
+            storePassword = p.getProperty("storePassword")
+            keyAlias = p.getProperty("keyAlias")
+            keyPassword = p.getProperty("keyPassword")
+        }
+    } else null
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            signingConfig = uploadSigning ?: signingConfigs.getByName("debug")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
