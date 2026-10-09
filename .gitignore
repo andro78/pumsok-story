@@ -8,4 +8,6 @@ local.properties
 *.wav
 *.epub
 !app/src/main/assets/*.epub
+server/voice/data/
+*.mp3
 .idea/

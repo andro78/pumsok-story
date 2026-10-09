@@ -406,15 +406,15 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
             ) {
                 Column(Modifier.padding(14.dp)) {
-                    Text("✅ ${currentProfile.roleLabel} 목소리 모델 학습 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
-                    Text("• 동화 구연 맞춤 피치: ${"%.2f".format(currentProfile.pitch)}x · 낭독 템포: ${"%.2f".format(currentProfile.speechRate)}x", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
+                    Text("✅ ${currentProfile.roleLabel} 뉴럴 AI 목소리 학습 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
+                    Text("• ${currentProfile.roleLabel} 고유 음색과 F0 피치(${"%.2f".format(currentProfile.pitch)}x) 분석 완료", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
                     Text("• 학습 음성 길이: 약 ${currentProfile.sampleDurationSec.toInt()}초 (${currentProfile.clipsCount}개 클립)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { testTrainedVoice() }, enabled = !recording) {
+                        Button(onClick = { testTrainedVoice() }, enabled = !recording && !isTraining) {
                             Text("🎧 학습 목소리 테스트")
                         }
-                        OutlinedButton(onClick = { startVoiceTraining() }, enabled = !recording) {
+                        OutlinedButton(onClick = { startVoiceTraining() }, enabled = !recording && !isTraining) {
                             Text("다시 학습하기")
                         }
                     }
@@ -426,21 +426,21 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
             ) {
                 Column(Modifier.padding(14.dp)) {
-                    Text("⚡ ${speakerRole.label} 목소리 AI 트레이닝", style = MaterialTheme.typography.titleMedium)
+                    Text("⚡ ${speakerRole.label} 뉴럴 AI 보이스 클로닝", style = MaterialTheme.typography.titleMedium)
                     val canTrain = hasRecording || stepRecorded.any { it }
                     Text(
                         if (canTrain)
-                            "녹음된 음성이 준비되었습니다. 버튼을 누르면 약 3초 동안 ${speakerRole.label} 목소리 모델을 학습합니다."
+                            "녹음된 음성이 준비되었습니다. 버튼을 누르면 ${speakerRole.label}의 고유 톤과 억양을 분석하여 뉴럴 AI 모델을 생성합니다."
                         else
-                            "위의 4단계 문장을 먼저 녹음하신 후, AI 학습을 시작할 수 있습니다.",
+                            "위의 4단계 문장을 먼저 녹음하신 후, 뉴럴 AI 학습을 시작할 수 있습니다.",
                         style = MaterialTheme.typography.bodySmall
                     )
                     Spacer(Modifier.height(8.dp))
                     Button(
                         onClick = { startVoiceTraining() },
-                        enabled = canTrain && !recording
+                        enabled = canTrain && !recording && !isTraining
                     ) {
-                        Text("🚀 ${speakerRole.label} 목소리 학습 시작 (약 3초)")
+                        Text("🚀 ${speakerRole.label} 뉴럴 AI 학습 시작")
                     }
                 }
             }
@@ -507,23 +507,23 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
                 ) {
                     Column(Modifier.padding(14.dp)) {
-                        Text("❤️ ${currentProfile.roleLabel} 학습된 목소리로 읽기", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
-                        Text("학습된 음높이(${"%.2f".format(currentProfile.pitch)}x)와 포근한 구연 템포(${"%.2f".format(currentProfile.speechRate)}x)로 동화를 읽어줍니다.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF33691E))
+                        Text("❤️ ${currentProfile.roleLabel} 뉴럴 AI 목소리로 읽기", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
+                        Text("${currentProfile.roleLabel}의 목소리 톤과 자연스러운 구연 억양을 입힌 뉴럴 AI 음성으로 동화를 읽어줍니다.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF33691E))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
                             Button(
                                 onClick = {
-                                    stopAllAudio()
-                                    tts?.let { voiceEngine.speak(book.paragraphs[index], currentProfile, it) }
+                                    readParagraphWithNeuralVoice(book.paragraphs[index], currentProfile)
                                 },
-                                enabled = ttsReady && !recording && !isTraining
+                                enabled = !recording && !isTraining
                             ) {
-                                Text("❤️ ${currentProfile.roleLabel} 목소리로 읽기")
+                                Text("❤️ ${currentProfile.roleLabel} AI 목소리로 읽기")
                             }
                             if (hasRecording) {
                                 Button(
                                     onClick = {
+                                        stopAllAudio()
                                         playFile(voiceFile) {
-                                            tts?.let { voiceEngine.speak(book.paragraphs[index], currentProfile, it) }
+                                            readParagraphWithNeuralVoice(book.paragraphs[index], currentProfile)
                                         }
                                     },
                                     enabled = !recording && !isTraining,
@@ -720,18 +720,48 @@ class MainActivity : ComponentActivity() {
 
         executor.execute {
             runCatching {
-                VoiceTrainer.train(
-                    roleKey = speakerRole.name,
-                    roleLabel = speakerRole.label,
-                    audioFiles = filesToUse
-                ) { state ->
-                    runOnUiThread {
-                        trainingProgress = state.progress
-                        trainingStepTitle = state.title
-                        trainingStepDesc = state.description
-                    }
+                if ((!voiceFile.exists() || voiceFile.length() < 1000) && clips.isNotEmpty()) {
+                    AudioConcatenator.concatM4a(clips, voiceFile)
                 }
-            }.onSuccess { trained ->
+                val fileToUpload = if (voiceFile.exists() && voiceFile.length() > 1000) voiceFile else filesToUse.first()
+                val isOnline = NeuralVoiceClient.checkHealth()
+
+                if (isOnline) {
+                    val trained = NeuralVoiceClient.trainOnServer(
+                        roleKey = speakerRole.name,
+                        roleLabel = speakerRole.label,
+                        audioFile = fileToUpload
+                    ) { step, title ->
+                        runOnUiThread {
+                            trainingProgress = step / 4.0f
+                            trainingStepTitle = title
+                            trainingStepDesc = when (step) {
+                                1 -> "부모님의 실제 음성을 d32.org AI 음성 복제 서버로 전송합니다."
+                                2 -> "음성 잡음을 제거하고 기본 주파수(F0) 및 억양 곡선을 추출합니다."
+                                3 -> "부모님 성도(Vocal tract) 특성과 음색(Timbre) 벡터를 학습합니다."
+                                4 -> "학습된 뉴럴 보이스 클로닝 모델 생성이 완료되었습니다."
+                                else -> ""
+                            }
+                        }
+                    }
+                    val previewFile = File(cacheDir, "preview_${speakerRole.name.lowercase()}.mp3")
+                    NeuralVoiceClient.downloadPreview("speaker_${speakerRole.name.lowercase()}", previewFile)
+                    Pair(trained, true)
+                } else {
+                    val trained = VoiceTrainer.train(
+                        roleKey = speakerRole.name,
+                        roleLabel = speakerRole.label,
+                        audioFiles = filesToUse
+                    ) { state ->
+                        runOnUiThread {
+                            trainingProgress = state.progress
+                            trainingStepTitle = state.title
+                            trainingStepDesc = state.description
+                        }
+                    }
+                    Pair(trained, false)
+                }
+            }.onSuccess { (trained, isOnline) ->
                 runOnUiThread {
                     isTraining = false
                     if (speakerRole == SpeakerRole.MOTHER) {
@@ -741,7 +771,11 @@ class MainActivity : ComponentActivity() {
                         fatherProfile = trained
                         prefs.edit().putString("profile_FATHER", trained.toJson()).apply()
                     }
-                    message = "🎉 ${trained.roleLabel} 목소리 학습 완료! [테스트] 또는 동화 읽기를 시작해보세요."
+                    message = if (isOnline) {
+                        "🎉 ${trained.roleLabel} 뉴럴 AI 보이스 클로닝 완료! [🎧 학습 목소리 테스트]를 들어보세요."
+                    } else {
+                        "🎉 ${trained.roleLabel} 목소리 학습 완료! [🎧 학습 목소리 테스트] 또는 동화 읽기를 시작해보세요."
+                    }
                 }
             }.onFailure { err ->
                 runOnUiThread {
@@ -756,8 +790,52 @@ class MainActivity : ComponentActivity() {
         stopAllAudio()
         val profile = currentProfile
         val phrase = "사랑하는 우리 아이야, ${profile.roleLabel}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 가보자."
-        tts?.let { voiceEngine.speak(phrase, profile, it, "test_phrase") }
-        message = "‘${profile.roleLabel}’ 학습된 목소리로 테스트 음성을 재생합니다."
+        val previewFile = File(cacheDir, "preview_${profile.roleKey.lowercase()}.mp3")
+        if (previewFile.exists() && previewFile.length() > 500) {
+            message = "🎧 ‘${profile.roleLabel}’ 뉴럴 AI 학습 목소리를 재생합니다."
+            playFile(previewFile)
+            return
+        }
+
+        message = "✨ ${profile.roleLabel} 뉴럴 AI 목소리로 테스트 음성을 준비 중입니다…"
+        executor.execute {
+            val ok = NeuralVoiceClient.synthesizeSpeech(phrase, profile.roleKey, previewFile)
+            runOnUiThread {
+                if (ok && previewFile.exists()) {
+                    message = "🎧 ‘${profile.roleLabel}’ 뉴럴 AI 학습 목소리를 재생합니다."
+                    playFile(previewFile)
+                } else {
+                    tts?.let { voiceEngine.speak(phrase, profile, it, "test_phrase") }
+                    message = "‘${profile.roleLabel}’ 기기 TTS로 테스트 음성을 재생합니다."
+                }
+            }
+        }
+    }
+
+    private fun readParagraphWithNeuralVoice(text: String, profile: VoiceProfile) {
+        stopAllAudio()
+        val hash = (profile.roleKey + ":" + text).hashCode().toString().replace("-", "n")
+        val cacheFile = File(cacheDir, "story_${profile.roleKey.lowercase()}_$hash.mp3")
+
+        if (cacheFile.exists() && cacheFile.length() > 500) {
+            message = "❤️ ${profile.roleLabel} AI 목소리로 읽어줍니다."
+            playFile(cacheFile)
+            return
+        }
+
+        message = "✨ ${profile.roleLabel} 뉴럴 AI 목소리로 문장 생성 중…"
+        executor.execute {
+            val ok = NeuralVoiceClient.synthesizeSpeech(text, profile.roleKey, cacheFile)
+            runOnUiThread {
+                if (ok && cacheFile.exists()) {
+                    message = "❤️ ${profile.roleLabel} AI 목소리로 읽어줍니다."
+                    playFile(cacheFile)
+                } else {
+                    tts?.let { voiceEngine.speak(text, profile, it) }
+                    message = "오프라인 상태이므로 기기 음성으로 재생합니다."
+                }
+            }
+        }
     }
 
     private fun playFile(file: File, onComplete: (() -> Unit)? = null) {
