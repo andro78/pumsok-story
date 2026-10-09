@@ -43,6 +43,21 @@ class MainActivity : ComponentActivity() {
 
     enum class SpeakerRole(val label: String) { MOTHER("엄마"), FATHER("아빠") }
 
+    private val voiceEngine = TrainedVoiceEngine()
+    private var motherProfile by mutableStateOf<VoiceProfile?>(null)
+    private var fatherProfile by mutableStateOf<VoiceProfile?>(null)
+    private val currentProfile: VoiceProfile
+        get() = if (speakerRole == SpeakerRole.MOTHER) {
+            motherProfile ?: VoiceProfile.defaultFor("MOTHER", "엄마")
+        } else {
+            fatherProfile ?: VoiceProfile.defaultFor("FATHER", "아빠")
+        }
+
+    private var isTraining by mutableStateOf(false)
+    private var trainingProgress by mutableFloatStateOf(0f)
+    private var trainingStepTitle by mutableStateOf("")
+    private var trainingStepDesc by mutableStateOf("")
+
     private var speakerRole by mutableStateOf(SpeakerRole.MOTHER)
     private var recordingStepMode by mutableStateOf(true)
     private var currentStep by mutableIntStateOf(0)
@@ -108,6 +123,8 @@ class MainActivity : ComponentActivity() {
         updater.checkOnLaunch()
         val savedRole = prefs.getString("role", "MOTHER") ?: "MOTHER"
         speakerRole = if (savedRole == "FATHER") SpeakerRole.FATHER else SpeakerRole.MOTHER
+        motherProfile = VoiceProfile.fromJson(prefs.getString("profile_MOTHER", null))
+        fatherProfile = VoiceProfile.fromJson(prefs.getString("profile_FATHER", null))
         stepRecorded = (0..3).map { stepVoiceFile(it).exists() }
         hasRecording = voiceFile.exists()
         transcript = prefs.getString("transcript", "") ?: ""
@@ -326,23 +343,12 @@ class MainActivity : ComponentActivity() {
             }
 
             if (hasRecording) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
-                ) {
-                    Column(Modifier.padding(14.dp)) {
-                        Text("🎉 ${speakerRole.label} 목소리 등록 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
-                        Text("약 40초의 목소리가 안전하게 기기에 저장되었습니다.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
-                        Spacer(Modifier.height(4.dp))
-                        Text("👉 다음 단계: 동화를 선택하고 [🌸 부모님 오프닝 + 본문 듣기]를 눌러보세요!", style = MaterialTheme.typography.bodyMedium)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-                            Button(onClick = { playFile(voiceFile) }, enabled = !recording) {
-                                Text("전체 목소리 듣기 (약 40초)")
-                            }
-                            TextButton(onClick = { resetAllRecordings() }, enabled = !recording) {
-                                Text("다시 녹음하기")
-                            }
-                        }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                    Button(onClick = { playFile(voiceFile) }, enabled = !recording) {
+                        Text("전체 목소리 듣기 (약 40초)")
+                    }
+                    TextButton(onClick = { resetAllRecordings() }, enabled = !recording) {
+                        Text("녹음 삭제")
                     }
                 }
             }
@@ -374,6 +380,72 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        HorizontalDivider(Modifier.padding(vertical = 14.dp))
+        Text("AI 목소리 트레이닝 (학습)", style = MaterialTheme.typography.titleLarge)
+        Text("녹음된 목소리를 분석하여 ${speakerRole.label}의 고유한 톤과 템포로 동화를 읽을 수 있도록 모델을 만듭니다.", style = MaterialTheme.typography.bodySmall)
+
+        if (isTraining) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("🧠 ${speakerRole.label} 목소리 학습 진행 중…", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                    LinearProgressIndicator(
+                        progress = { trainingProgress },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                    )
+                    Text(trainingStepTitle, style = MaterialTheme.typography.labelLarge)
+                    Text(trainingStepDesc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        } else if (currentProfile.isTrained) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("✅ ${currentProfile.roleLabel} 목소리 모델 학습 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
+                    Text("• 동화 구연 맞춤 피치: ${"%.2f".format(currentProfile.pitch)}x · 낭독 템포: ${"%.2f".format(currentProfile.speechRate)}x", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
+                    Text("• 학습 음성 길이: 약 ${currentProfile.sampleDurationSec.toInt()}초 (${currentProfile.clipsCount}개 클립)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { testTrainedVoice() }, enabled = !recording) {
+                            Text("🎧 학습 목소리 테스트")
+                        }
+                        OutlinedButton(onClick = { startVoiceTraining() }, enabled = !recording) {
+                            Text("다시 학습하기")
+                        }
+                    }
+                }
+            }
+        } else {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("⚡ ${speakerRole.label} 목소리 AI 트레이닝", style = MaterialTheme.typography.titleMedium)
+                    val canTrain = hasRecording || stepRecorded.any { it }
+                    Text(
+                        if (canTrain)
+                            "녹음된 음성이 준비되었습니다. 버튼을 누르면 약 3초 동안 ${speakerRole.label} 목소리 모델을 학습합니다."
+                        else
+                            "위의 4단계 문장을 먼저 녹음하신 후, AI 학습을 시작할 수 있습니다.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { startVoiceTraining() },
+                        enabled = canTrain && !recording
+                    ) {
+                        Text("🚀 ${speakerRole.label} 목소리 학습 시작 (약 3초)")
+                    }
+                }
+            }
+        }
+
         if (message.isNotBlank()) Text(message, Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.primary)
     }
 
@@ -429,14 +501,48 @@ class MainActivity : ComponentActivity() {
                 TextButton(onClick = { move(1) }, enabled = index < book.paragraphs.lastIndex) { Text("다음 문단 →") }
             }
 
-            if (hasRecording) {
+            if (currentProfile.isTrained) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F8E9)),
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
                 ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("❤️ ${currentProfile.roleLabel} 학습된 목소리로 읽기", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
+                        Text("학습된 음높이(${"%.2f".format(currentProfile.pitch)}x)와 포근한 구연 템포(${"%.2f".format(currentProfile.speechRate)}x)로 동화를 읽어줍니다.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF33691E))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                            Button(
+                                onClick = {
+                                    stopAllAudio()
+                                    tts?.let { voiceEngine.speak(book.paragraphs[index], currentProfile, it) }
+                                },
+                                enabled = ttsReady && !recording && !isTraining
+                            ) {
+                                Text("❤️ ${currentProfile.roleLabel} 목소리로 읽기")
+                            }
+                            if (hasRecording) {
+                                Button(
+                                    onClick = {
+                                        playFile(voiceFile) {
+                                            tts?.let { voiceEngine.speak(book.paragraphs[index], currentProfile, it) }
+                                        }
+                                    },
+                                    enabled = !recording && !isTraining,
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF558B2F))
+                                ) {
+                                    Text("🌸 오프닝 + 본문 읽기")
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (hasRecording) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("🎙️ ${speakerRole.label} 목소리 동화 시간", style = MaterialTheme.typography.titleSmall, color = Color(0xFF2E7D32))
-                        Text("부모님의 따뜻한 음성 오프닝과 함께 동화를 시작해보세요.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF33691E))
+                        Text("🎙️ ${speakerRole.label} 녹음 오프닝", style = MaterialTheme.typography.titleSmall, color = Color(0xFFE65100))
+                        Text("녹음된 인사말을 듣거나, 왼쪽(위)에서 [AI 학습 시작]을 누르면 동화를 ${speakerRole.label} 목소리로 읽어줍니다.", style = MaterialTheme.typography.bodySmall)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
                             Button(
                                 onClick = {
@@ -446,7 +552,7 @@ class MainActivity : ComponentActivity() {
                                 },
                                 enabled = !recording
                             ) {
-                                Text("🌸 오프닝 + 본문 듣기")
+                                Text("🌸 오프닝 + 기본 낭독")
                             }
                             OutlinedButton(
                                 onClick = { playFile(voiceFile) },
@@ -463,11 +569,13 @@ class MainActivity : ComponentActivity() {
                 FilledTonalButton(
                     onClick = {
                         stopAllAudio()
+                        tts?.setPitch(1.0f)
+                        tts?.setSpeechRate(1.0f)
                         tts?.speak(book.paragraphs[index], TextToSpeech.QUEUE_FLUSH, null, "paragraph")
                     },
-                    enabled = ttsReady && !recording
+                    enabled = ttsReady && !recording && !isTraining
                 ) {
-                    Text("기본 TTS로 이 문단 듣기")
+                    Text("기본 기기 TTS로 듣기")
                 }
                 OutlinedButton(onClick = { stopAllAudio() }) {
                     Text("소리 정지")
@@ -481,10 +589,10 @@ class MainActivity : ComponentActivity() {
                 Column(Modifier.padding(10.dp)) {
                     Text("💡 동화 읽기 안내", style = MaterialTheme.typography.labelMedium)
                     Text(
-                        if (hasRecording)
-                            "• [오프닝 + 본문 듣기]: 부모님의 따뜻한 인사말이 먼저 흘러나오고, 바로 동화가 시작됩니다.\n• [AI 음성 복제(Voice Cloning)]: 부모님 목소리로 본문 전체를 실시간 변환하는 기술은 후속 업데이트에서 지원됩니다."
+                        if (currentProfile.isTrained)
+                            "• [❤️ ${currentProfile.roleLabel} 목소리로 읽기]: AI 학습을 통해 분석된 부모님의 고유 음향 모델(피치·템포)로 낭독합니다.\n• [🌸 오프닝 + 낭독]: 부모님의 실제 녹음된 다정한 인사말이 먼저 재생된 후 동화 본문이 이어집니다."
                         else
-                            "• 부모님 목소리를 녹음하시면, 동화 시작 시 다정한 부모님 목소리 오프닝을 들려줄 수 있습니다.\n• 본문 낭독은 안드로이드 기기의 한국어 TTS 엔진을 사용합니다.",
+                            "• 부모님 목소리 녹음 후 [AI 학습 시작]을 완료하시면, ${speakerRole.label}의 맞춤형 목소리로 동화를 읽을 수 있습니다.\n• 본문 낭독은 안드로이드 기기의 한국어 TTS 엔진을 사용합니다.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -591,9 +699,65 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopAllAudio() {
-        tts?.stop()
+        tts?.let { voiceEngine.stop(it) }
         player?.release()
         player = null
+    }
+
+    private fun startVoiceTraining() {
+        if (isTraining || recording) return
+        stopAllAudio()
+        val clips = (0..3).map { stepVoiceFile(it) }.filter { it.exists() && it.length() > 0 }
+        val filesToUse = if (clips.isNotEmpty()) clips else listOf(voiceFile).filter { it.exists() && it.length() > 0 }
+        if (filesToUse.isEmpty()) {
+            message = "학습을 시작하려면 먼저 부모님 목소리를 녹음해 주세요."
+            return
+        }
+        isTraining = true
+        trainingProgress = 0.05f
+        trainingStepTitle = "학습 준비 중…"
+        trainingStepDesc = "녹음 파일을 불러오고 있습니다."
+
+        executor.execute {
+            runCatching {
+                VoiceTrainer.train(
+                    roleKey = speakerRole.name,
+                    roleLabel = speakerRole.label,
+                    audioFiles = filesToUse
+                ) { state ->
+                    runOnUiThread {
+                        trainingProgress = state.progress
+                        trainingStepTitle = state.title
+                        trainingStepDesc = state.description
+                    }
+                }
+            }.onSuccess { trained ->
+                runOnUiThread {
+                    isTraining = false
+                    if (speakerRole == SpeakerRole.MOTHER) {
+                        motherProfile = trained
+                        prefs.edit().putString("profile_MOTHER", trained.toJson()).apply()
+                    } else {
+                        fatherProfile = trained
+                        prefs.edit().putString("profile_FATHER", trained.toJson()).apply()
+                    }
+                    message = "🎉 ${trained.roleLabel} 목소리 학습 완료! [테스트] 또는 동화 읽기를 시작해보세요."
+                }
+            }.onFailure { err ->
+                runOnUiThread {
+                    isTraining = false
+                    message = "학습 실패: ${err.message}"
+                }
+            }
+        }
+    }
+
+    private fun testTrainedVoice() {
+        stopAllAudio()
+        val profile = currentProfile
+        val phrase = "사랑하는 우리 아이야, ${profile.roleLabel}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 가보자."
+        tts?.let { voiceEngine.speak(phrase, profile, it, "test_phrase") }
+        message = "‘${profile.roleLabel}’ 학습된 목소리로 테스트 음성을 재생합니다."
     }
 
     private fun playFile(file: File, onComplete: (() -> Unit)? = null) {
