@@ -14,9 +14,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -85,7 +87,14 @@ class MainActivity : ComponentActivity() {
                     check(temp.renameTo(File(filesDir, "book.epub"))) { "책을 저장하지 못했습니다" }
                     parsed
                 }.onSuccess { parsed ->
-                    runOnUiThread { tts?.stop(); story = parsed; index = 0; prefs.edit().putInt("index", 0).apply(); message = "동화를 가져왔습니다"; busy = false }
+                    runOnUiThread {
+                        stopAllAudio()
+                        story = parsed
+                        index = 0
+                        prefs.edit().putInt("index", 0).apply()
+                        message = "‘${parsed.title}’ 동화를 가져왔습니다."
+                        busy = false
+                    }
                 }.onFailure { e ->
                     temp.delete()
                     runOnUiThread { message = e.message ?: "가져오기 실패"; busy = false }
@@ -113,18 +122,25 @@ class MainActivity : ComponentActivity() {
         }
         executor.execute {
             val saved = File(filesDir, "book.epub")
-            if (saved.exists()) {
-                runCatching { EpubReader.read(saved) }.onSuccess { parsed ->
-                    runOnUiThread { story = parsed; index = prefs.getInt("index", 0).coerceIn(parsed.paragraphs.indices) }
-                }
-            } else {
-                runCatching {
+            val parsed = runCatching {
+                if (!saved.exists() || saved.length() == 0L) {
                     assets.open("sun_and_moon.epub").use { input ->
                         saved.outputStream().use { out -> input.copyTo(out) }
                     }
-                    EpubReader.read(saved)
-                }.onSuccess { parsed ->
-                    runOnUiThread { story = parsed; index = 0; message = "기본 동화를 준비했습니다." }
+                }
+                EpubReader.read(saved)
+            }.recoverCatching {
+                saved.delete()
+                assets.open("sun_and_moon.epub").use { input ->
+                    saved.outputStream().use { out -> input.copyTo(out) }
+                }
+                EpubReader.read(saved)
+            }.getOrNull()
+
+            if (parsed != null) {
+                runOnUiThread {
+                    story = parsed
+                    index = prefs.getInt("index", 0).coerceIn(parsed.paragraphs.indices)
                 }
             }
         }
@@ -157,11 +173,21 @@ class MainActivity : ComponentActivity() {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-            OutlinedButton(onClick = { loadAssetStory("sun_and_moon.epub") }, enabled = !busy) {
-                Text("샘플: 해와 달")
+            val isSun = story?.title?.contains("해와 달") == true
+            OutlinedButton(
+                onClick = { loadAssetStory("sun_and_moon.epub") },
+                colors = if (isSun) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
+                enabled = !busy
+            ) {
+                Text(if (isSun) "✓ 샘플: 해와 달" else "샘플: 해와 달")
             }
-            OutlinedButton(onClick = { loadAssetStory("rabbit_and_turtle.epub") }, enabled = !busy) {
-                Text("샘플: 토끼와 거북이")
+            val isTurtle = story?.title?.contains("거북이") == true
+            OutlinedButton(
+                onClick = { loadAssetStory("rabbit_and_turtle.epub") },
+                colors = if (isTurtle) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
+                enabled = !busy
+            ) {
+                Text(if (isTurtle) "✓ 샘플: 토끼와 거북이" else "샘플: 토끼와 거북이")
             }
         }
         HorizontalDivider(Modifier.padding(vertical = 16.dp))
@@ -300,12 +326,23 @@ class MainActivity : ComponentActivity() {
             }
 
             if (hasRecording) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 4.dp)) {
-                    Button(onClick = { playFile(voiceFile) }, enabled = !recording) {
-                        Text("전체 목소리 듣기 (약 40초)")
-                    }
-                    TextButton(onClick = { resetAllRecordings() }, enabled = !recording) {
-                        Text("전체 삭제")
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("🎉 ${speakerRole.label} 목소리 등록 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
+                        Text("약 40초의 목소리가 안전하게 기기에 저장되었습니다.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
+                        Spacer(Modifier.height(4.dp))
+                        Text("👉 다음 단계: 동화를 선택하고 [🌸 부모님 오프닝 + 본문 듣기]를 눌러보세요!", style = MaterialTheme.typography.bodyMedium)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                            Button(onClick = { playFile(voiceFile) }, enabled = !recording) {
+                                Text("전체 목소리 듣기 (약 40초)")
+                            }
+                            TextButton(onClick = { resetAllRecordings() }, enabled = !recording) {
+                                Text("다시 녹음하기")
+                            }
+                        }
                     }
                 }
             }
@@ -330,36 +367,134 @@ class MainActivity : ComponentActivity() {
             ) {
                 Text(if (recording) "녹음 종료" else "녹음 시작")
             }
-            Row {
-                TextButton(onClick = { playFile(voiceFile) }, enabled = hasRecording && !recording) { Text("녹음 듣기") }
-                TextButton(onClick = { resetAllRecordings() }, enabled = hasRecording && !recording) { Text("녹음 삭제") }
+            if (hasRecording) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                    Button(onClick = { playFile(voiceFile) }, enabled = !recording) { Text("녹음 듣기") }
+                    TextButton(onClick = { resetAllRecordings() }, enabled = !recording) { Text("녹음 삭제") }
+                }
             }
         }
-        Text("부모님 목소리 생성: 엔진 연결 준비 중", color = MaterialTheme.colorScheme.primary)
-        if (message.isNotBlank()) Text(message, Modifier.padding(vertical = 8.dp))
+        if (message.isNotBlank()) Text(message, Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.primary)
     }
 
     @Composable private fun Reader() {
         val book = story
         HorizontalDivider(Modifier.padding(vertical = 16.dp))
-        Text(book?.title ?: "함께 읽을 동화를 골라주세요", style = MaterialTheme.typography.headlineSmall)
-        if (book != null) {
-            Text("${index + 1} / ${book.paragraphs.size} 문단")
-            Text(book.paragraphs[index], style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(vertical = 24.dp))
-            Row {
-                TextButton(onClick = { move(-1) }, enabled = index > 0) { Text("이전") }
-                TextButton(onClick = { move(1) }, enabled = index < book.paragraphs.lastIndex) { Text("다음") }
+        if (book == null) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp).fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("📖 함께 읽을 동화를 골라주세요", style = MaterialTheme.typography.titleMedium)
+                    Text("아래 추천 동화를 누르면 바로 이야기를 시작할 수 있습니다.", modifier = Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                        Button(onClick = { loadAssetStory("sun_and_moon.epub") }, enabled = !busy) {
+                            Text("해와 달이 된 오누이")
+                        }
+                        Button(onClick = { loadAssetStory("rabbit_and_turtle.epub") }, enabled = !busy) {
+                            Text("토끼와 거북이")
+                        }
+                    }
+                }
             }
-            Button(onClick = {
-                tts?.speak(book.paragraphs[index], TextToSpeech.QUEUE_FLUSH, null, "paragraph")
-            }, enabled = ttsReady && !recording) { Text("기본 목소리로 이 문단 듣기") }
-            TextButton(onClick = { tts?.stop() }) { Text("낭독 정지") }
-            Text("현재 낭독은 기기의 기본 TTS이며 부모님 목소리가 아닙니다.")
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(book.title, style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.primary)
+                Text("${index + 1} / ${book.paragraphs.size} 문단", style = MaterialTheme.typography.labelMedium)
+            }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+            ) {
+                Text(
+                    book.paragraphs[index],
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(16.dp),
+                    lineHeight = 28.sp
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                TextButton(onClick = { move(-1) }, enabled = index > 0) { Text("← 이전 문단") }
+                TextButton(onClick = { move(1) }, enabled = index < book.paragraphs.lastIndex) { Text("다음 문단 →") }
+            }
+
+            if (hasRecording) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F8E9)),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("🎙️ ${speakerRole.label} 목소리 동화 시간", style = MaterialTheme.typography.titleSmall, color = Color(0xFF2E7D32))
+                        Text("부모님의 따뜻한 음성 오프닝과 함께 동화를 시작해보세요.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF33691E))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                            Button(
+                                onClick = {
+                                    playFile(voiceFile) {
+                                        tts?.speak(book.paragraphs[index], TextToSpeech.QUEUE_FLUSH, null, "paragraph")
+                                    }
+                                },
+                                enabled = !recording
+                            ) {
+                                Text("🌸 오프닝 + 본문 듣기")
+                            }
+                            OutlinedButton(
+                                onClick = { playFile(voiceFile) },
+                                enabled = !recording
+                            ) {
+                                Text("오프닝만 듣기")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 4.dp)) {
+                FilledTonalButton(
+                    onClick = {
+                        stopAllAudio()
+                        tts?.speak(book.paragraphs[index], TextToSpeech.QUEUE_FLUSH, null, "paragraph")
+                    },
+                    enabled = ttsReady && !recording
+                ) {
+                    Text("기본 TTS로 이 문단 듣기")
+                }
+                OutlinedButton(onClick = { stopAllAudio() }) {
+                    Text("소리 정지")
+                }
+            }
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)),
+                modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+            ) {
+                Column(Modifier.padding(10.dp)) {
+                    Text("💡 동화 읽기 안내", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        if (hasRecording)
+                            "• [오프닝 + 본문 듣기]: 부모님의 따뜻한 인사말이 먼저 흘러나오고, 바로 동화가 시작됩니다.\n• [AI 음성 복제(Voice Cloning)]: 부모님 목소리로 본문 전체를 실시간 변환하는 기술은 후속 업데이트에서 지원됩니다."
+                        else
+                            "• 부모님 목소리를 녹음하시면, 동화 시작 시 다정한 부모님 목소리 오프닝을 들려줄 수 있습니다.\n• 본문 낭독은 안드로이드 기기의 한국어 TTS 엔진을 사용합니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 
     private fun move(delta: Int) {
-        tts?.stop()
+        stopAllAudio()
         index = (index + delta).coerceIn(0, (story?.paragraphs?.lastIndex ?: 0))
         prefs.edit().putInt("index", index).apply()
     }
@@ -375,11 +510,11 @@ class MainActivity : ComponentActivity() {
                 EpubReader.read(book)
             }.onSuccess { parsed ->
                 runOnUiThread {
-                    tts?.stop()
+                    stopAllAudio()
                     story = parsed
                     index = 0
                     prefs.edit().putInt("index", 0).apply()
-                    message = "${parsed.title} 동화를 불러왔습니다."
+                    message = "‘${parsed.title}’ 동화를 불러왔습니다."
                     busy = false
                 }
             }.onFailure { e ->
@@ -393,7 +528,7 @@ class MainActivity : ComponentActivity() {
 
     @Suppress("DEPRECATION")
     private fun startRecording() {
-        tts?.stop(); player?.release(); player = null
+        stopAllAudio()
         val targetTmp = File(filesDir, "voice.tmp")
         val next = MediaRecorder()
         runCatching {
@@ -433,7 +568,7 @@ class MainActivity : ComponentActivity() {
                         hasRecording = true
                         transcript = getFullDefaultScript(speakerRole)
                         prefs.edit().putString("transcript", transcript).apply()
-                        message = "🎉 4개 문장(약 40초) 녹음이 완료되어 부모님 목소리로 등록되었습니다!"
+                        message = "🎉 4개 문장(약 40초) 녹음이 완료되었습니다! 동화를 골라 [🌸 오프닝 + 본문 듣기]를 눌러보세요."
                     } else {
                         message = "${currentStep + 1}단계는 저장되었으나 전체 병합에 실패했습니다."
                     }
@@ -446,7 +581,7 @@ class MainActivity : ComponentActivity() {
                 if (voiceFile.exists()) voiceFile.delete()
                 check(pending.renameTo(voiceFile))
                 hasRecording = true
-                message = "녹음을 저장했습니다."
+                message = "🎉 녹음이 완료되었습니다! 동화를 골라 [🌸 오프닝 + 본문 듣기]를 눌러보세요."
             }
         }.onFailure {
             pending.delete()
@@ -455,21 +590,36 @@ class MainActivity : ComponentActivity() {
         active.release(); recorder = null; recording = false
     }
 
-    private fun playFile(file: File) {
-        if (!file.exists()) return
+    private fun stopAllAudio() {
+        tts?.stop()
         player?.release()
+        player = null
+    }
+
+    private fun playFile(file: File, onComplete: (() -> Unit)? = null) {
+        if (!file.exists()) return
+        stopAllAudio()
         runCatching {
             MediaPlayer().also { p ->
                 player = p
                 p.setDataSource(file.absolutePath)
-                p.setOnCompletionListener { it.release(); player = null }
-                p.prepare(); p.start()
+                p.setOnCompletionListener {
+                    it.release()
+                    player = null
+                    runOnUiThread { onComplete?.invoke() }
+                }
+                p.prepare()
+                p.start()
             }
-        }.onFailure { player?.release(); player = null; message = "녹음을 재생하지 못했습니다." }
+        }.onFailure {
+            player?.release()
+            player = null
+            message = "녹음을 재생하지 못했습니다."
+        }
     }
 
     private fun resetAllRecordings() {
-        player?.release(); player = null
+        stopAllAudio()
         voiceFile.delete()
         (0..3).forEach { stepVoiceFile(it).delete() }
         stepRecorded = listOf(false, false, false, false)
@@ -486,7 +636,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         if (recording) finishRecording()
-        tts?.stop(); player?.release(); player = null
+        stopAllAudio()
         super.onStop()
     }
 
