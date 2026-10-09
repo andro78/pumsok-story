@@ -60,13 +60,45 @@ def get_tone_converter():
 
 
 def extract_speaker_embedding(wav_path: str, save_path: str) -> bool:
-    """Extracts 256-d neural speaker embedding from parent reference audio."""
+    """
+    Extracts high-resolution 256-d neural speaker embedding from parent reference audio.
+    Slices audio into 8-second speech chunks and averages reference embeddings
+    for maximum stability, phonetic coverage, and fidelity.
+    """
     converter, _ = get_tone_converter()
     if converter is None or not os.path.exists(wav_path):
         return False
     try:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        converter.extract_se(wav_path, se_save_path=save_path)
+        y, sr = librosa.load(wav_path, sr=converter.hps.data.sampling_rate)
+        chunk_len = int(sr * 8)
+        chunks = []
+        tmp_dir = os.path.join(os.path.dirname(save_path), "tmp_chunks")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        if len(y) > chunk_len * 1.5:
+            for idx, i in enumerate(range(0, len(y), chunk_len)):
+                chunk = y[i:i + chunk_len]
+                if len(chunk) >= int(sr * 2.5):
+                    chunk_file = os.path.join(tmp_dir, f"chunk_{idx}.wav")
+                    soundfile.write(chunk_file, chunk, sr)
+                    chunks.append(chunk_file)
+
+        files_to_extract = chunks if chunks else [wav_path]
+        converter.extract_se(files_to_extract, se_save_path=save_path)
+
+        for c in chunks:
+            if os.path.exists(c):
+                try:
+                    os.remove(c)
+                except Exception:
+                    pass
+        if os.path.exists(tmp_dir):
+            try:
+                os.rmdir(tmp_dir)
+            except Exception:
+                pass
+
         return os.path.exists(save_path)
     except Exception as e:
         print(f"Failed to extract speaker embedding: {e}", flush=True)

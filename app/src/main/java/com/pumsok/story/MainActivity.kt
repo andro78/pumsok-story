@@ -67,21 +67,26 @@ class MainActivity : ComponentActivity() {
     private var tuningUseEleven by mutableStateOf(false)
     private var isTuningPreviewLoading by mutableStateOf(false)
 
+    private val totalSteps = 8
     private var speakerRole by mutableStateOf(SpeakerRole.MOTHER)
     private var recordingStepMode by mutableStateOf(true)
     private var currentStep by mutableIntStateOf(0)
-    private var stepRecorded by mutableStateOf(listOf(false, false, false, false))
+    private var stepRecorded by mutableStateOf(List(8) { false })
 
     private fun getStepScript(step: Int, role: SpeakerRole): String = when (step) {
-        0 -> "우리 아가, 오늘 하루도 재미있게 잘 보냈니?"
+        0 -> "우리 아가, 오늘 하루도 재미있고 씩씩하게 잘 보냈니?"
         1 -> "창밖으로 별들이 반짝이고, 달님이 은은하게 미소를 짓는 밤이야."
         2 -> "${role.label}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 여행을 떠나보자."
-        3 -> "이제 편안하게 눈을 감으면, 숲속 친구들의 재미있는 이야기가 시작될 거야."
+        3 -> "오늘 숲속에서는 어떤 신기하고 재미있는 일들이 일어났을까?"
+        4 -> "와아! 알록달록 무지개 언덕에 달콤한 열매들이 가득 열렸네!"
+        5 -> "쉿, 아기 곰이 새근새근 잠들었으니 발소리를 죽이고 조용히 걸어가자."
+        6 -> "아무 걱정하지 마렴, 언제나 ${role.label}가 네 곁에서 든든하게 지켜줄게."
+        7 -> "사랑하는 우리 아가, 오늘 밤도 예쁜 꿈 꾸렴. 편안하게 잘 자렴."
         else -> ""
     }
 
     private fun getFullDefaultScript(role: SpeakerRole): String =
-        (0..3).joinToString(" ") { getStepScript(it, role) }
+        (0 until totalSteps).joinToString(" ") { getStepScript(it, role) }
 
     private fun stepVoiceFile(step: Int) = File(filesDir, "voice_step_$step.m4a")
 
@@ -134,7 +139,7 @@ class MainActivity : ComponentActivity() {
         speakerRole = if (savedRole == "FATHER") SpeakerRole.FATHER else SpeakerRole.MOTHER
         motherProfile = VoiceProfile.fromJson(prefs.getString("profile_MOTHER", null))
         fatherProfile = VoiceProfile.fromJson(prefs.getString("profile_FATHER", null))
-        stepRecorded = (0..3).map { stepVoiceFile(it).exists() }
+        stepRecorded = (0 until totalSteps).map { stepVoiceFile(it).exists() }
         hasRecording = voiceFile.exists()
         transcript = prefs.getString("transcript", "") ?: ""
         if (transcript.isBlank()) {
@@ -299,17 +304,35 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(vertical = 12.dp)
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-                        (0..3).forEach { stepIndex ->
-                            val done = stepRecorded.getOrElse(stepIndex) { false }
-                            val isCurrent = stepIndex == currentStep
-                            OutlinedButton(
-                                onClick = { if (!recording) currentStep = stepIndex },
-                                colors = if (isCurrent) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                enabled = !recording
-                            ) {
-                                Text("${stepIndex + 1}단계 ${if (done) "✓" else ""}")
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 12.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                            (0..3).forEach { stepIndex ->
+                                val done = stepRecorded.getOrElse(stepIndex) { false }
+                                val isCurrent = stepIndex == currentStep
+                                OutlinedButton(
+                                    onClick = { if (!recording) currentStep = stepIndex },
+                                    colors = if (isCurrent) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                    modifier = Modifier.weight(1f),
+                                    enabled = !recording
+                                ) {
+                                    Text("${stepIndex + 1}단계${if (done) "✓" else ""}", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                            (4..7).forEach { stepIndex ->
+                                val done = stepRecorded.getOrElse(stepIndex) { false }
+                                val isCurrent = stepIndex == currentStep
+                                OutlinedButton(
+                                    onClick = { if (!recording) currentStep = stepIndex },
+                                    colors = if (isCurrent) ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFF673AB7).copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                                    modifier = Modifier.weight(1f),
+                                    enabled = !recording
+                                ) {
+                                    Text("${stepIndex + 1}단계${if (done) "✓" else ""}", fontSize = 11.sp)
+                                }
                             }
                         }
                     }
@@ -336,6 +359,7 @@ class MainActivity : ComponentActivity() {
 
                     Row(
                         horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
                     ) {
                         TextButton(
@@ -344,9 +368,15 @@ class MainActivity : ComponentActivity() {
                         ) {
                             Text("← 이전 문장")
                         }
+                        val recordedCount = stepRecorded.count { it }
+                        Text(
+                            "$recordedCount / $totalSteps 문장",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                         TextButton(
-                            onClick = { currentStep = (currentStep + 1).coerceAtMost(3) },
-                            enabled = currentStep < 3 && !recording
+                            onClick = { currentStep = (currentStep + 1).coerceAtMost(totalSteps - 1) },
+                            enabled = currentStep < totalSteps - 1 && !recording
                         ) {
                             Text("다음 문장 →")
                         }
@@ -448,13 +478,16 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
             ) {
                 Column(Modifier.padding(14.dp)) {
-                    Text("⚡ ${speakerRole.label} 뉴럴 AI 보이스 클로닝", style = MaterialTheme.typography.titleMedium)
-                    val canTrain = hasRecording || stepRecorded.any { it }
+                    Text("⚡ ${speakerRole.label} OpenVoice 딥러닝 보이스 클로닝", style = MaterialTheme.typography.titleMedium)
+                    val recordedCount = stepRecorded.count { it }
+                    val canTrain = hasRecording || recordedCount >= 4
                     Text(
-                        if (canTrain)
-                            "녹음된 음성이 준비되었습니다. 버튼을 누르면 ${speakerRole.label}의 고유 톤과 억양을 분석하여 뉴럴 AI 모델을 생성합니다."
+                        if (recordedCount == totalSteps)
+                            "🌟 8단계 전체 문장(약 1분 30초) 녹음 완료! 최고 정밀도로 OpenVoice 뉴럴 AI 학습을 진행합니다."
+                        else if (recordedCount >= 4)
+                            "💡 현재 ${recordedCount}단계 녹음 완료! 지금 바로 OpenVoice 학습이 가능하며, 8단계까지 채우시면 음색이 더욱 정교해집니다."
                         else
-                            "위의 4단계 문장을 먼저 녹음하신 후, 뉴럴 AI 학습을 시작할 수 있습니다.",
+                            "최소 4단계 이상 문장을 녹음하시면 무료 OpenVoice 뉴럴 AI 학습을 시작할 수 있습니다. (현재 ${recordedCount}/$totalSteps 단계)",
                         style = MaterialTheme.typography.bodySmall
                     )
                     Spacer(Modifier.height(8.dp))
@@ -462,7 +495,7 @@ class MainActivity : ComponentActivity() {
                         onClick = { startVoiceTraining() },
                         enabled = canTrain && !recording && !isTraining
                     ) {
-                        Text("🚀 ${speakerRole.label} 뉴럴 AI 학습 시작")
+                        Text(if (recordedCount == totalSteps) "🚀 8단계 정밀 OpenVoice AI 학습 시작" else "🚀 ${recordedCount}단계 OpenVoice AI 학습 시작")
                     }
                 }
             }
@@ -699,19 +732,23 @@ class MainActivity : ComponentActivity() {
                 updated[currentStep] = true
                 stepRecorded = updated
 
-                if (updated.all { it }) {
-                    val merged = AudioConcatenator.concatM4a((0..3).map { stepVoiceFile(it) }, voiceFile)
-                    if (merged) {
-                        hasRecording = true
-                        transcript = getFullDefaultScript(speakerRole)
-                        prefs.edit().putString("transcript", transcript).apply()
-                        message = "🎉 4개 문장(약 40초) 녹음이 완료되었습니다! 동화를 골라 [🌸 오프닝 + 본문 듣기]를 눌러보세요."
-                    } else {
-                        message = "${currentStep + 1}단계는 저장되었으나 전체 병합에 실패했습니다."
-                    }
+                val recordedClips = (0 until totalSteps).map { stepVoiceFile(it) }.filter { it.exists() && it.length() > 0 }
+                if (recordedClips.isNotEmpty()) {
+                    AudioConcatenator.concatM4a(recordedClips, voiceFile)
+                    hasRecording = voiceFile.exists() && voiceFile.length() > 1000
+                }
+                val countDone = updated.count { it }
+                if (countDone == totalSteps) {
+                    transcript = getFullDefaultScript(speakerRole)
+                    prefs.edit().putString("transcript", transcript).apply()
+                    message = "🎉 8단계 전체 문장(약 1분 30초) 녹음 완료! [AI 학습 시작]을 눌러 최고 정밀도로 학습해보세요."
+                } else if (countDone >= 4) {
+                    message = "✅ ${currentStep + 1}단계 저장 완료! (${countDone}/$totalSteps 단계 완료 - 지금 학습하거나 더 녹음 가능)"
+                    val nextStep = (currentStep + 1).coerceAtMost(totalSteps - 1)
+                    if (!stepRecorded[nextStep]) currentStep = nextStep
                 } else {
-                    message = "${currentStep + 1}단계 문장이 저장되었습니다."
-                    val nextStep = (currentStep + 1).coerceAtMost(3)
+                    message = "✅ ${currentStep + 1}단계 문장이 저장되었습니다. (${countDone}/$totalSteps 단계)"
+                    val nextStep = (currentStep + 1).coerceAtMost(totalSteps - 1)
                     if (!stepRecorded[nextStep]) currentStep = nextStep
                 }
             } else {
@@ -736,10 +773,10 @@ class MainActivity : ComponentActivity() {
     private fun startVoiceTraining() {
         if (isTraining || recording) return
         stopAllAudio()
-        val clips = (0..3).map { stepVoiceFile(it) }.filter { it.exists() && it.length() > 0 }
+        val clips = (0 until totalSteps).map { stepVoiceFile(it) }.filter { it.exists() && it.length() > 0 }
         val filesToUse = if (clips.isNotEmpty()) clips else listOf(voiceFile).filter { it.exists() && it.length() > 0 }
         if (filesToUse.isEmpty()) {
-            message = "학습을 시작하려면 먼저 부모님 목소리를 녹음해 주세요."
+            message = "학습을 시작하려면 먼저 부모님 목소리를 최소 4문장 이상 녹음해 주세요."
             return
         }
         isTraining = true
@@ -765,10 +802,10 @@ class MainActivity : ComponentActivity() {
                             trainingProgress = step / 4.0f
                             trainingStepTitle = title
                             trainingStepDesc = when (step) {
-                                1 -> "부모님의 실제 음성을 d32.org AI 음성 복제 서버로 전송합니다."
-                                2 -> "음성 잡음을 제거하고 기본 주파수(F0) 및 억양 곡선을 추출합니다."
-                                3 -> "부모님 성도(Vocal tract) 특성과 음색(Timbre) 벡터를 학습합니다."
-                                4 -> "학습된 뉴럴 보이스 클로닝 모델 생성이 완료되었습니다."
+                                1 -> "부모님의 실제 음성(${clips.size}개 문장)을 d32.org OpenVoice 뉴럴 서버로 전송합니다."
+                                2 -> "음성 잡음을 제거하고 기본 주파수(F0) 및 억양 곡선을 정밀 분석합니다."
+                                3 -> "부모님 성도 특성과 256차원 OpenVoice 딥러닝 음색 벡터를 다중 구간 합성합니다."
+                                4 -> "OpenVoice 딥러닝 보이스 클로닝 모델 생성이 완료되었습니다!"
                                 else -> ""
                             }
                         }
@@ -1089,8 +1126,8 @@ class MainActivity : ComponentActivity() {
     private fun resetAllRecordings() {
         stopAllAudio()
         voiceFile.delete()
-        (0..3).forEach { stepVoiceFile(it).delete() }
-        stepRecorded = listOf(false, false, false, false)
+        (0 until totalSteps).forEach { stepVoiceFile(it).delete() }
+        stepRecorded = List(totalSteps) { false }
         hasRecording = false
         prefs.edit().remove("transcript").apply()
         transcript = getFullDefaultScript(speakerRole)
