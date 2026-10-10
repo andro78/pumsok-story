@@ -355,5 +355,5 @@ def phonemes(req: PhonemeRequest):
     import phonemes as ph  # heavy (mecab); loaded on first use
     return {
         "version": ph.PHONEME_VERSION,
-        "paragraphs": [ph.phonemize(p[:5000]) for p in req.paragraphs],
+        "paragraphs": [ph.phonemize(p) for p in req.paragraphs],
     }
