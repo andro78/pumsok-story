@@ -39,12 +39,12 @@ class OnDeviceBook(private val context: Context) {
     private var dir: File? = null
 
     private val prefs get() = context.getSharedPreferences("reader", Context.MODE_PRIVATE)
-    val bundleUrl: String get() = prefs.getString("ondevice_bundle_url", "") ?: ""
 
-    /** Points the state at [story] and counts paragraphs that are already generated. */
-    fun attach(story: Story) {
+    /** Points the state at [story] read in [role]'s voice and counts paragraphs already generated. */
+    fun attach(story: Story, role: String) {
         if (running) return
-        val d = bookDir(story)
+        val sel = OnDeviceVoices.selection(context, role)
+        val d = if (sel == null) File(context.filesDir, "ondevice/books/none") else bookDir(story, sel)
         dir = d
         total = story.paragraphs.size
         readyCount = story.paragraphs.indices.count { paragraphFile(d, it).exists() }
@@ -56,13 +56,14 @@ class OnDeviceBook(private val context: Context) {
 
     fun stop() = cancel.set(true)
 
-    fun start(story: Story, onParagraphReady: (Int) -> Unit = {}) {
-        if (running || bundleUrl.isBlank()) return
+    fun start(story: Story, role: String, onParagraphReady: (Int) -> Unit = {}) {
+        val sel = OnDeviceVoices.selection(context, role) ?: return
+        if (running) return
         cancel.set(false)
         running = true
         Thread {
             try {
-                generate(story, onParagraphReady)
+                generate(story, sel, onParagraphReady)
             } catch (e: Throwable) {
                 status = "실패: ${e.message ?: e.javaClass.simpleName}"
             } finally {
@@ -71,11 +72,11 @@ class OnDeviceBook(private val context: Context) {
         }.start()
     }
 
-    private fun generate(story: Story, onParagraphReady: (Int) -> Unit) {
-        val bundleDir = OnDeviceTts.bundleDir(context, bundleUrl)
-        OnDeviceTts.download(bundleUrl, bundleDir) { name, p -> status = "모델 확인 중… $name (${(p * 100).toInt()}%)" }
+    private fun generate(story: Story, sel: OnDeviceVoices.Selection, onParagraphReady: (Int) -> Unit) {
+        val bundleDir = OnDeviceTts.bundleDir(context, sel.modelUrl)
+        OnDeviceTts.download(sel.modelUrl, bundleDir) { name, p -> status = "모델 확인 중… $name (${(p * 100).toInt()}%)" }
         // The voice may have changed with the download, so pick the book folder only now.
-        val d = bookDir(story).also { it.mkdirs() }
+        val d = bookDir(story, sel).also { it.mkdirs() }
         dir = d
         readyCount = story.paragraphs.indices.count { paragraphFile(d, it).exists() }
         progress = readyCount.toFloat() / total
@@ -83,7 +84,7 @@ class OnDeviceBook(private val context: Context) {
         val segments = loadPhonemes(story, d)
         status = "목소리 엔진을 불러오는 중…"
         val threads = prefs.getInt("ondevice_threads", 6)
-        OnDeviceTts(bundleDir, threads).use { tts ->
+        OnDeviceTts(bundleDir, threads, sel.voiceDir ?: bundleDir).use { tts ->
             var audioSec = 0f
             var workSec = 0f
             var made = 0
@@ -146,13 +147,10 @@ class OnDeviceBook(private val context: Context) {
         return out
     }
 
-    private fun bookDir(story: Story): File {
-        // Keyed by text and voice, so editing the book or retraining the voice regenerates audio.
-        // The voice is the downloaded bundle's id (the URL can stay the same across retrains).
-        val manifest = File(OnDeviceTts.bundleDir(context, bundleUrl), "manifest.json")
-        val voiceId = runCatching { JSONObject(manifest.readText()).optString("bundle_id") }.getOrNull()
+    private fun bookDir(story: Story, sel: OnDeviceVoices.Selection): File {
+        // Keyed by text and voice, so editing the book or changing/retraining the voice regenerates audio.
         val digest = MessageDigest.getInstance("SHA-256")
-        digest.update((voiceId?.ifBlank { null } ?: bundleUrl).toByteArray())
+        digest.update(sel.voiceId(context).toByteArray())
         digest.update(story.title.toByteArray())
         story.paragraphs.forEach { digest.update(0); digest.update(it.toByteArray()) }
         val key = digest.digest().take(10).joinToString("") { "%02x".format(it) }

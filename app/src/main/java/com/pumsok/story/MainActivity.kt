@@ -30,6 +30,12 @@ private const val NEURAL_ENGINE_VERSION = 3
 class MainActivity : ComponentActivity() {
     private val updater by lazy { Updater(this) }
     private val onDeviceBook by lazy { OnDeviceBook(this) }
+    // Bumped whenever an on-device voice is built or the voice choice changes, to refresh the cards.
+    private var voiceVersion by mutableIntStateOf(0)
+    private var useLocalVoice by mutableStateOf(false)
+    private var voiceBuilding by mutableStateOf(false)
+    private var voiceBuildProgress by mutableFloatStateOf(0f)
+    private var voiceBuildStatus by mutableStateOf("")
     private val executor = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences("reader", MODE_PRIVATE) }
     private var story by mutableStateOf<Story?>(null)
@@ -145,6 +151,7 @@ class MainActivity : ComponentActivity() {
         motherProfile = VoiceProfile.fromJson(prefs.getString("profile_MOTHER", null))
         fatherProfile = VoiceProfile.fromJson(prefs.getString("profile_FATHER", null))
         stepRecorded = (0 until totalSteps).map { stepVoiceFile(it).exists() }
+        useLocalVoice = OnDeviceVoices.useLocal(this)
         hasRecording = voiceFile.exists()
         transcript = prefs.getString("transcript", "") ?: ""
         if (transcript.isBlank()) {
@@ -516,6 +523,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        OnDeviceVoiceCard()
+
         OnDeviceBenchCard(enabled = !recording && !isTraining, playFile = { playFile(it) })
 
         if (message.isNotBlank()) Text(message, Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.primary)
@@ -684,7 +693,11 @@ class MainActivity : ComponentActivity() {
 
     @Composable private fun OnDeviceBookCard(book: Story) {
         val ob = onDeviceBook
-        LaunchedEffect(book) { ob.attach(book) }
+        val role = speakerRole.name
+        val hasLocal = remember(voiceVersion, role) { OnDeviceVoices.hasLocal(this, role) }
+        val serverUrl = remember(voiceVersion, ob.running) { OnDeviceVoices.serverBundleUrl(this) }
+        val selection = remember(voiceVersion, role, useLocalVoice, serverUrl) { OnDeviceVoices.selection(this, role) }
+        LaunchedEffect(book, selection?.voiceDir, selection?.modelUrl, voiceVersion) { ob.attach(book, role) }
         LaunchedEffect(ob.running) {
             // Generating a whole book takes minutes; keep the screen (and the app) in the foreground.
             if (ob.running) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -700,8 +713,29 @@ class MainActivity : ComponentActivity() {
                     "‘${book.title}’ ${book.paragraphs.size}문단을 이 기기에서 목소리로 만들어 저장해요. 한 번 만들어 두면 인터넷 없이 들을 수 있어요. 만드는 동안은 화면을 켜 둘게요.",
                     style = MaterialTheme.typography.bodySmall
                 )
-                if (ob.bundleUrl.isBlank()) {
-                    Text("먼저 왼쪽(위)의 ‘🧪 온디바이스 엔진 테스트’에 모델 번들 주소를 넣어 주세요.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                if (hasLocal && serverUrl.isNotBlank()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = !useLocalVoice,
+                            onClick = { useLocalVoice = false; OnDeviceVoices.setUseLocal(this@MainActivity, false) },
+                            label = { Text("☁️ 서버에서 학습한 목소리") },
+                            enabled = !ob.running
+                        )
+                        FilterChip(
+                            selected = useLocalVoice,
+                            onClick = { useLocalVoice = true; OnDeviceVoices.setUseLocal(this@MainActivity, true) },
+                            label = { Text("📱 기기에서 만든 목소리") },
+                            enabled = !ob.running
+                        )
+                    }
+                } else if (selection != null) {
+                    Text(
+                        if (selection.voiceDir != null) "📱 기기에서 만든 ${speakerRole.label} 목소리로 읽어요." else "☁️ 서버에서 학습한 목소리로 읽어요.",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                if (selection == null) {
+                    Text("먼저 왼쪽(위)의 ‘📱 기기에서 목소리 만들기’로 ${speakerRole.label} 목소리를 만들거나, ‘🧪 온디바이스 엔진 테스트’에 모델 번들 주소를 넣어 주세요.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
                 LinearProgressIndicator(progress = { ob.progress }, modifier = Modifier.fillMaxWidth())
                 Text("${ob.readyCount}/${ob.total} 문단 준비됨", style = MaterialTheme.typography.labelMedium)
@@ -711,8 +745,8 @@ class MainActivity : ComponentActivity() {
                         OutlinedButton(onClick = { ob.stop() }) { Text("만들기 중지") }
                     } else {
                         Button(
-                            onClick = { ob.start(book) },
-                            enabled = ob.bundleUrl.isNotBlank() && !recording && !isTraining,
+                            onClick = { ob.start(book, role) },
+                            enabled = selection != null && !recording && !isTraining,
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
                         ) {
                             // When the book is complete this re-checks the voice bundle; a retrained voice regenerates it.
@@ -732,6 +766,94 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    @Composable private fun OnDeviceVoiceCard() {
+        val role = speakerRole.name
+        val hasLocal = remember(voiceVersion, role) { OnDeviceVoices.hasLocal(this, role) }
+        val recordedCount = stepRecorded.count { it }
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD)),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("📱 기기에서 목소리 만들기 (빠름 · 학습 없음)", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1565C0))
+                Text(
+                    "녹음한 단계 문장 하나로 이 기기에서 바로 ${speakerRole.label} 목소리를 만들어요. 서버로 녹음을 보내지 않아요. 처음 한 번 기본 모델(약 600MB)을 내려받으니 Wi-Fi에서 해 주세요. 서버에서 학습한 목소리보다는 덜 닮을 수 있어요.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                if (hasLocal) Text("✅ 기기에서 만든 ${speakerRole.label} 목소리가 있어요.", style = MaterialTheme.typography.labelMedium, color = Color(0xFF2E7D32))
+                if (voiceBuilding) LinearProgressIndicator(progress = { voiceBuildProgress }, modifier = Modifier.fillMaxWidth())
+                if (voiceBuildStatus.isNotBlank()) Text(voiceBuildStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { buildOnDeviceVoice() },
+                        enabled = consent && recordedCount > 0 && !voiceBuilding && !recording && !isTraining,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
+                    ) {
+                        Text(if (hasLocal) "📱 다시 만들기" else "📱 목소리 만들기")
+                    }
+                    if (hasLocal) {
+                        OutlinedButton(onClick = { previewOnDeviceVoice() }, enabled = !voiceBuilding && !recording) {
+                            Text("🎧 들어보기")
+                        }
+                    }
+                }
+                if (recordedCount == 0) Text("위에서 단계별 문장을 하나 이상 녹음해 주세요.", style = MaterialTheme.typography.bodySmall)
+                else if (!consent) Text("목소리 사용 동의에 체크해 주세요.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+
+    private fun buildOnDeviceVoice() {
+        val role = speakerRole
+        val clips = (0 until totalSteps).map { stepVoiceFile(it) to getStepScript(it, role) }
+        voiceBuilding = true
+        voiceBuildProgress = 0f
+        voiceBuildStatus = "준비 중…"
+        Thread {
+            try {
+                val info = OnDeviceVoices.build(this, role.name, clips, prefs.getInt("ondevice_threads", 6)) { s, p ->
+                    runOnUiThread { voiceBuildStatus = s; voiceBuildProgress = p }
+                }
+                runOnUiThread {
+                    voiceBuildStatus = "${role.label} 목소리를 만들었어요 (녹음 %.1f초 사용, %.1f초 걸림). ‘들어보기’로 확인해 보세요.".format(info.seconds, info.millis / 1000f)
+                    useLocalVoice = true
+                    OnDeviceVoices.setUseLocal(this, true)
+                    voiceVersion++
+                }
+            } catch (e: Throwable) {
+                runOnUiThread { voiceBuildStatus = "실패: ${e.message ?: e.javaClass.simpleName}" }
+            } finally {
+                runOnUiThread { voiceBuilding = false }
+            }
+        }.start()
+    }
+
+    /** Synthesizes one sample sentence with the voice built on this device and plays it. */
+    private fun previewOnDeviceVoice() {
+        val role = speakerRole
+        voiceBuilding = true
+        voiceBuildStatus = "샘플 문장을 만드는 중…"
+        Thread {
+            try {
+                val baseDir = OnDeviceTts.bundleDir(this, OnDeviceVoices.BASE_BUNDLE_URL)
+                val sample = org.json.JSONArray(File(baseDir, "bench.json").readText()).getJSONObject(0)
+                val phones = sample.getJSONArray("phones").let { a -> LongArray(a.length()) { a.getLong(it) } }
+                val wav = File(cacheDir, "ondevice_voice_preview.wav")
+                OnDeviceTts(baseDir, prefs.getInt("ondevice_threads", 6), OnDeviceVoices.localDir(this, role.name)).use { tts ->
+                    OnDeviceTts.writeWav(wav, tts.synthesize(phones).audio, tts.sampleRate)
+                }
+                runOnUiThread {
+                    voiceBuildStatus = "“${sample.getString("text")}”"
+                    playFile(wav)
+                }
+            } catch (e: Throwable) {
+                runOnUiThread { voiceBuildStatus = "실패: ${e.message ?: e.javaClass.simpleName}" }
+            } finally {
+                runOnUiThread { voiceBuilding = false }
+            }
+        }.start()
     }
 
     /** Plays generated paragraphs from [start], turning pages as it goes, until one is missing. */

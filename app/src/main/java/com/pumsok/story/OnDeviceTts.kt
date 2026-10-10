@@ -23,7 +23,11 @@ import java.util.Random
  * and test sentences carry phoneme ids, so the device only runs the GPT encoder/decoders and
  * the SoVITS decoder. Mirrors scripts/ort_infer_kv.py in the bench.
  */
-class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
+/**
+ * [dir] holds the models; [voiceDir] holds voice.json + ge.bin. They are the same folder for a
+ * server-made voice bundle, and differ for a voice built on the device on top of the base bundle.
+ */
+class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : AutoCloseable {
     class Result(val audio: FloatArray, val tokens: Int, val gptMs: Long, val vitsMs: Long)
 
     private val env = OrtEnvironment.getEnvironment()
@@ -46,11 +50,11 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
 
     init {
         require(manifest.optInt("format", 1) >= 2) { "이 앱 버전과 맞지 않는 모델 번들입니다. 번들을 다시 받아 주세요." }
-        val voice = JSONObject(File(dir, "voice.json").readText())
+        val voice = JSONObject(File(voiceDir, "voice.json").readText())
         refPhones = voice.getJSONArray("ref_phones").toLongArray()
         promptSemantic = voice.getJSONArray("prompt_semantic").toLongArray()
         geShape = voice.getJSONArray("ge_shape").toLongArray()
-        val geBytes = File(dir, "ge.bin").readBytes()
+        val geBytes = File(voiceDir, "ge.bin").readBytes()
         ge = FloatArray(geBytes.size / 4).also {
             ByteBuffer.wrap(geBytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(it)
         }
