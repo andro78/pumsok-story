@@ -98,7 +98,8 @@ PY
 sed -i -E "s/LATEST RELEASE · v[0-9.]+/LATEST RELEASE · v$NAME/g" "$OUT_DIR/index.html"
 sed -i -E "s/pumsok-v[0-9.]+\\.apk/$APK_OUT/g" "$OUT_DIR/index.html"
 sed -i -E "s/pumsok-v[0-9.]+\\.aab/$AAB_OUT/g" "$OUT_DIR/index.html"
-sed -i -E "s/v[0-9.]+ · [0-9.]+ MB/v$NAME · 6.4 MB/g" "$OUT_DIR/index.html"
+APK_MB=$(awk "BEGIN{printf \"%.1f\", $APK_SIZE/1048576}")
+sed -i -E "s/v[0-9.]+ · [0-9.]+ MB/v$NAME · $APK_MB MB/g" "$OUT_DIR/index.html"
 sed -i -E "/APK \\(직접 설치용\\)/ s/[0-9a-f]{64}/$APK_SHA/" "$OUT_DIR/index.html"
 sed -i -E "/AAB \\(Google Play용\\)/ s/[0-9a-f]{64}/$AAB_SHA/" "$OUT_DIR/index.html"
 
