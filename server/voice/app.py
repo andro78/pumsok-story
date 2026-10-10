@@ -30,6 +30,38 @@ for d in [REFS_DIR, PROFILES_DIR, CACHE_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
+@app.on_event("startup")
+def migrate_speaker_embeddings():
+    """Re-extracts embeddings made by an older extractor (e.g. before silence trimming)."""
+    for name in os.listdir(PROFILES_DIR):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(PROFILES_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+            if profile.get("seVersion") == engine.SE_VERSION:
+                continue
+            speaker_id = profile.get("speakerId") or name[:-5]
+            ref_wav = os.path.join(REFS_DIR, f"{speaker_id}.wav")
+            if not os.path.exists(ref_wav):
+                continue
+            se_path = os.path.join(REFS_DIR, f"{speaker_id}_se.pth")
+            voiced_sec = engine.extract_speaker_embedding(ref_wav, se_path)
+            if voiced_sec <= 0:
+                continue
+            profile["sePath"] = se_path
+            profile["seVersion"] = engine.SE_VERSION
+            profile["voicedSec"] = round(voiced_sec, 1)
+            if profile.get("tau") is not None and float(profile["tau"]) > 0.4:
+                profile["tau"] = engine.DEFAULT_TAU
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(profile, f, ensure_ascii=False, indent=2)
+            print(f"Re-extracted speaker embedding for {speaker_id} ({voiced_sec:.1f}s voiced)", flush=True)
+        except Exception as e:
+            print(f"Embedding migration failed for {name}: {e}", flush=True)
+
+
 class SynthesizeRequest(BaseModel):
     text: str
     speakerId: str = "speaker_mother"
@@ -43,7 +75,7 @@ class SynthesizeRequest(BaseModel):
 class TuneRequest(BaseModel):
     speakerId: str
     pitchOffsetHz: int = 0
-    tau: float = 0.22
+    tau: float = 0.3
     warmthDb: float = 1.8
     presenceDb: float = -0.5
     speedRate: str = "-6%"
@@ -102,7 +134,8 @@ async def train_speaker(
 
     # 2. Extract 256-d neural speaker embedding via OpenVoice
     se_path = os.path.join(REFS_DIR, f"{speakerId}_se.pth")
-    has_neural_se = engine.extract_speaker_embedding(ref_wav, se_path)
+    voiced_sec = engine.extract_speaker_embedding(ref_wav, se_path)
+    has_neural_se = voiced_sec > 0
 
     profile = {
         "speakerId": speakerId,
@@ -117,8 +150,10 @@ async def train_speaker(
         "spectralMidRatio": features["spectralMidRatio"],
         "spectralHighRatio": features["spectralHighRatio"],
         "sePath": se_path if has_neural_se else None,
+        "seVersion": engine.SE_VERSION if has_neural_se else None,
+        "voicedSec": round(voiced_sec, 1),
         "pitchOffsetHz": 0,
-        "tau": 0.22,
+        "tau": engine.DEFAULT_TAU,
         "warmthDb": 1.8,
         "presenceDb": -0.5,
         "speedRate": "-6%" if role_upper == "FATHER" else "-8%",
@@ -159,6 +194,8 @@ async def train_speaker(
         "f0MedianHz": features["f0MedianHz"],
         "durationSec": features["durationSec"],
         "hasNeuralOpenVoice": has_neural_se,
+        "voicedSec": round(voiced_sec, 1),
+        "referenceTooShort": has_neural_se and voiced_sec < engine.MIN_RECOMMENDED_VOICED_SEC,
         "hasElevenLabs": bool(profile.get("elevenLabsVoiceId")),
         "previewUrl": f"/api/voice/preview/{speakerId}"
     }
@@ -242,7 +279,7 @@ def synthesize(req: SynthesizeRequest):
         active_profile["speedRate"] = req.speedRate
 
     # Cache key including tuning params
-    tuning_sig = f"{active_profile.get('pitchOffsetHz', 0)}:{active_profile.get('tau', 0.22)}:{active_profile.get('warmthDb', 1.8)}:{active_profile.get('speedRate', '')}"
+    tuning_sig = f"v{engine.ENGINE_VERSION}:{active_profile.get('seVersion')}:{active_profile.get('pitchOffsetHz', 0)}:{active_profile.get('tau', engine.DEFAULT_TAU)}:{active_profile.get('warmthDb', 1.8)}:{active_profile.get('speedRate', '')}"
     cache_hash = hashlib.sha256(f"{active_profile.get('speakerId', req.speakerId)}:{tuning_sig}:{req.text}".encode()).hexdigest()
     out_mp3 = os.path.join(CACHE_DIR, f"{cache_hash}.mp3")
 

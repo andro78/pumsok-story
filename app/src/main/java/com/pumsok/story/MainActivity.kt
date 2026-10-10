@@ -23,6 +23,9 @@ import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
 
+// Bump together with the server ENGINE_VERSION so locally cached story audio is regenerated.
+private const val NEURAL_ENGINE_VERSION = 3
+
 class MainActivity : ComponentActivity() {
     private val updater by lazy { Updater(this) }
     private val executor = Executors.newSingleThreadExecutor()
@@ -60,7 +63,7 @@ class MainActivity : ComponentActivity() {
 
     private var showVoiceTuningDialog by mutableStateOf(false)
     private var tuningPitchOffset by mutableFloatStateOf(0f)
-    private var tuningTau by mutableFloatStateOf(0.22f)
+    private var tuningTau by mutableFloatStateOf(0.3f)
     private var tuningWarmth by mutableFloatStateOf(2.0f)
     private var tuningSpeed by mutableStateOf("-6%")
     private var tuningElevenKey by mutableStateOf("")
@@ -888,7 +891,7 @@ class MainActivity : ComponentActivity() {
 
     private fun readParagraphWithNeuralVoice(text: String, profile: VoiceProfile) {
         stopAllAudio()
-        val tuningSig = "${profile.pitchOffsetHz}_${(profile.tau * 100).toInt()}_${(profile.warmthDb * 10).toInt()}_${profile.speedRate}"
+        val tuningSig = "v${NEURAL_ENGINE_VERSION}_${profile.pitchOffsetHz}_${(profile.tau * 100).toInt()}_${(profile.warmthDb * 10).toInt()}_${profile.speedRate}"
         val hash = (profile.roleKey + ":" + tuningSig + ":" + text).hashCode().toString().replace("-", "n")
         val cacheFile = File(cacheDir, "story_${profile.roleKey.lowercase()}_$hash.mp3")
 
@@ -1010,15 +1013,15 @@ class MainActivity : ComponentActivity() {
 
                     // 2. Tau (Neural Clone Resemblance)
                     Column {
-                        val tauDesc = if (tuningTau >= 0.28f) "강한 복제 (고유 음색 강조)" else if (tuningTau <= 0.15f) "부드러운 음색 (자연스러움)" else "균형 잡힌 음색 (권장)"
+                        val tauDesc = if (tuningTau >= 0.35f) "표현 풍부 (잡음 증가)" else if (tuningTau <= 0.2f) "깨끗함 (단조로움)" else "균형 (권장)"
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("2. 뉴럴 음색 복제 강도", style = MaterialTheme.typography.labelMedium)
+                            Text("2. 뉴럴 변환 표현 범위", style = MaterialTheme.typography.labelMedium)
                             Text("${"%.2f".format(tuningTau)} - $tauDesc", style = MaterialTheme.typography.labelSmall, color = Color(0xFF673AB7))
                         }
                         Slider(
                             value = tuningTau,
                             onValueChange = { tuningTau = it },
-                            valueRange = 0.10f..0.45f
+                            valueRange = 0.10f..0.40f
                         )
                     }
 

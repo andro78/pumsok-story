@@ -12,8 +12,8 @@ android {
         applicationId = "com.pumsok.story"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.5.2"
+        versionCode = 11
+        versionName = "0.5.3"
     }
     buildFeatures { compose = true }
     val keystoreFile = rootProject.file("keystore.properties")

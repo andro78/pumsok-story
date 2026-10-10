@@ -12,6 +12,7 @@ import json
 import time
 import asyncio
 import hashlib
+import shutil
 import subprocess
 import requests
 import numpy as np
@@ -32,6 +33,24 @@ MODEL_DIR = os.getenv("MODEL_DIR", "/app/data/models/openvoice")
 CKPT_PATH = os.path.join(MODEL_DIR, "checkpoint.pth")
 CONFIG_PATH = os.path.join(MODEL_DIR, "config.json")
 KR_SE_PATH = os.path.join(MODEL_DIR, "kr.pth")
+
+# Bump when the synthesis pipeline changes so cached audio is regenerated.
+ENGINE_VERSION = "3"
+# Bump when the speaker embedding extraction changes so stored embeddings are re-extracted.
+SE_VERSION = 2
+
+DEFAULT_TAU = 0.3
+MIN_RECOMMENDED_VOICED_SEC = 20.0
+
+# Sentences used to measure the Edge TTS base voice's own tone color (source embedding).
+SOURCE_SE_SENTENCES = [
+    "옛날 옛적 어느 깊은 산골에 어머니와 착한 오누이가 살고 있었습니다.",
+    "우리 아가, 오늘 하루도 재미있게 잘 보냈니?",
+    "창밖으로 별들이 반짝이고, 달님이 은은하게 미소를 짓는 밤이야.",
+    "이제 편안하게 눈을 감으면, 숲속 친구들의 재미있는 이야기가 시작될 거야.",
+    "토끼는 깡충깡충 뛰어가다가 커다란 나무 아래에서 잠시 쉬었어요.",
+    "그러자 할아버지가 빙그레 웃으며 말씀하셨습니다. 걱정하지 말거라.",
+]
 
 _tone_color_converter = None
 _kr_base_se = None
@@ -59,50 +78,124 @@ def get_tone_converter():
     return _tone_color_converter, _kr_base_se
 
 
-def extract_speaker_embedding(wav_path: str, save_path: str) -> bool:
+def _voiced_audio(y: np.ndarray, sr: int, top_db: float = 35.0) -> np.ndarray:
+    """Drops silent gaps so the embedding is computed on speech only."""
+    intervals = librosa.effects.split(y, top_db=top_db)
+    if len(intervals) == 0:
+        return y
+    pad = int(sr * 0.05)
+    parts = [y[max(0, a - pad):min(len(y), b + pad)] for a, b in intervals]
+    return np.concatenate(parts)
+
+
+def _extract_se_from_files(converter, wav_paths: list, save_path: str, chunk_sec: float = 8.0) -> float:
     """
-    Extracts high-resolution 256-d neural speaker embedding from parent reference audio.
-    Slices audio into 8-second speech chunks and averages reference embeddings
-    for maximum stability, phonetic coverage, and fidelity.
+    Removes silence, slices speech into ~8 s chunks and averages their embeddings.
+    Returns the total voiced duration in seconds (0.0 on failure).
+    """
+    sr = converter.hps.data.sampling_rate
+    voiced = []
+    for p in wav_paths:
+        y, _ = librosa.load(p, sr=sr)
+        voiced.append(_voiced_audio(y, sr))
+    y = np.concatenate(voiced) if voiced else np.zeros(0, dtype=np.float32)
+    voiced_sec = len(y) / float(sr)
+    if voiced_sec < 1.0:
+        return 0.0
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    tmp_dir = save_path + ".chunks"
+    os.makedirs(tmp_dir, exist_ok=True)
+    chunk_len = int(sr * chunk_sec)
+    min_len = int(sr * 2.5)
+    chunks = []
+    try:
+        for idx, i in enumerate(range(0, len(y), chunk_len)):
+            chunk = y[i:i + chunk_len]
+            if len(chunk) >= min_len or not chunks:
+                chunk_file = os.path.join(tmp_dir, f"chunk_{idx}.wav")
+                soundfile.write(chunk_file, chunk, sr)
+                chunks.append(chunk_file)
+        converter.extract_se(chunks, se_save_path=save_path)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return voiced_sec if os.path.exists(save_path) else 0.0
+
+
+def extract_speaker_embedding(wav_path: str, save_path: str) -> float:
+    """
+    Extracts the 256-d neural speaker embedding from the parent reference audio.
+    Returns the voiced (non-silent) duration used, or 0.0 if extraction failed.
     """
     converter, _ = get_tone_converter()
     if converter is None or not os.path.exists(wav_path):
-        return False
+        return 0.0
     try:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        y, sr = librosa.load(wav_path, sr=converter.hps.data.sampling_rate)
-        chunk_len = int(sr * 8)
-        chunks = []
-        tmp_dir = os.path.join(os.path.dirname(save_path), "tmp_chunks")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        if len(y) > chunk_len * 1.5:
-            for idx, i in enumerate(range(0, len(y), chunk_len)):
-                chunk = y[i:i + chunk_len]
-                if len(chunk) >= int(sr * 2.5):
-                    chunk_file = os.path.join(tmp_dir, f"chunk_{idx}.wav")
-                    soundfile.write(chunk_file, chunk, sr)
-                    chunks.append(chunk_file)
-
-        files_to_extract = chunks if chunks else [wav_path]
-        converter.extract_se(files_to_extract, se_save_path=save_path)
-
-        for c in chunks:
-            if os.path.exists(c):
-                try:
-                    os.remove(c)
-                except Exception:
-                    pass
-        if os.path.exists(tmp_dir):
-            try:
-                os.rmdir(tmp_dir)
-            except Exception:
-                pass
-
-        return os.path.exists(save_path)
+        return _extract_se_from_files(converter, [wav_path], save_path)
     except Exception as e:
         print(f"Failed to extract speaker embedding: {e}", flush=True)
-        return False
+        return 0.0
+
+
+def _run_edge_tts(text: str, voice: str, pitch_arg: str, rate_arg: str, out_mp3: str) -> bool:
+    cmd = [
+        sys.executable, "-m", "edge_tts",
+        f"--voice={voice}",
+        f"--pitch={pitch_arg}",
+        f"--rate={rate_arg}",
+        f"--text={text}",
+        f"--write-media={out_mp3}"
+    ]
+    res = subprocess.run(cmd, capture_output=True, timeout=30)
+    if res.returncode != 0:
+        print(f"Edge TTS subprocess error ({res.returncode}): {res.stderr.decode()}", flush=True)
+    return os.path.exists(out_mp3) and os.path.getsize(out_mp3) >= 100
+
+
+_source_se_cache = {}
+
+
+def get_source_embedding(base_voice: str, pitch_arg: str):
+    """
+    Returns the tone color embedding of the Edge TTS base voice at the given pitch.
+    OpenVoice removes the source timbre before applying the parent's timbre, so the
+    source embedding must describe the audio actually being converted (not kr.pth,
+    which belongs to the MeloTTS Korean base speaker). Cached on disk per voice/pitch.
+    """
+    key = f"{base_voice}_{pitch_arg}"
+    if key in _source_se_cache:
+        return _source_se_cache[key]
+
+    converter, _ = get_tone_converter()
+    if converter is None:
+        return None
+
+    cache_dir = os.path.join(MODEL_DIR, "source_se")
+    se_path = os.path.join(cache_dir, f"{key}.pth")
+    if not os.path.exists(se_path):
+        os.makedirs(cache_dir, exist_ok=True)
+        tmp_files = []
+        try:
+            for idx, sentence in enumerate(SOURCE_SE_SENTENCES):
+                mp3 = os.path.join(cache_dir, f"{key}_{idx}.tmp.mp3")
+                if _run_edge_tts(sentence, base_voice, pitch_arg, "+0%", mp3):
+                    tmp_files.append(mp3)
+            if tmp_files:
+                _extract_se_from_files(converter, tmp_files, se_path)
+        except Exception as e:
+            print(f"Failed to build source embedding for {key}: {e}", flush=True)
+        finally:
+            for f in tmp_files:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+    if not os.path.exists(se_path):
+        return None
+    se = torch.load(se_path, map_location="cpu")
+    _source_se_cache[key] = se
+    return se
 
 
 def analyze_audio_properties(wav_path: str) -> dict:
@@ -275,24 +368,12 @@ def synthesize_cloned_voice(text: str, profile: dict, reference_wav: str, output
         baseline_f0 = 210.0
         tempo_rate = user_speed or "-8%"
 
-    # Compute pitch shift in Hz
+    # Compute pitch shift in Hz. Large shifts on the base voice add artifacts, so keep it moderate.
     total_pitch_diff = int(round((f0 - baseline_f0) + pitch_offset_user))
-    total_pitch_diff = max(-55, min(55, total_pitch_diff))
+    total_pitch_diff = max(-30, min(30, total_pitch_diff))
     pitch_arg = f"{total_pitch_diff:+d}Hz"
 
-    cmd_tts = [
-        sys.executable, "-m", "edge_tts",
-        f"--voice={base_voice}",
-        f"--pitch={pitch_arg}",
-        f"--rate={tempo_rate}",
-        f"--text={text}",
-        f"--write-media={raw_tts_mp3}"
-    ]
-    res = subprocess.run(cmd_tts, capture_output=True, timeout=30)
-    if res.returncode != 0:
-        print(f"Edge TTS subprocess error ({res.returncode}): {res.stderr.decode()}", flush=True)
-
-    if not os.path.exists(raw_tts_mp3) or os.path.getsize(raw_tts_mp3) < 100:
+    if not _run_edge_tts(text, base_voice, pitch_arg, tempo_rate, raw_tts_mp3):
         duration = max(2.0, len(text) * 0.18)
         subprocess.run([
             "ffmpeg", "-f", "lavfi",
@@ -309,34 +390,37 @@ def synthesize_cloned_voice(text: str, profile: dict, reference_wav: str, output
     converter, kr_se = get_tone_converter()
     used_openvoice = False
 
-    if converter is not None and kr_se is not None and os.path.exists(se_path):
+    if converter is not None and os.path.exists(se_path):
         try:
-            tgt_se = torch.load(se_path, map_location="cpu")
-            tau = float(profile.get("tau") if profile.get("tau") is not None else 0.22)  # Tone color transfer strength (0.15~0.35)
-            converter.convert(
-                audio_src_path=raw_tts_mp3,
-                src_se=kr_se,
-                tgt_se=tgt_se,
-                output_path=converted_wav,
-                tau=tau
-            )
-            if os.path.exists(converted_wav) and os.path.getsize(converted_wav) > 1000:
-                used_openvoice = True
+            src_se = get_source_embedding(base_voice, pitch_arg)
+            if src_se is None:
+                src_se = kr_se
+            if src_se is not None:
+                tgt_se = torch.load(se_path, map_location="cpu")
+                # tau is the posterior sampling noise scale, not a "strength": higher = noisier.
+                tau = profile.get("tau")
+                tau = DEFAULT_TAU if tau is None else max(0.1, min(0.4, float(tau)))
+                converter.convert(
+                    audio_src_path=raw_tts_mp3,
+                    src_se=src_se,
+                    tgt_se=tgt_se,
+                    output_path=converted_wav,
+                    tau=tau
+                )
+                if os.path.exists(converted_wav) and os.path.getsize(converted_wav) > 1000:
+                    used_openvoice = True
         except Exception as e:
             print(f"OpenVoice conversion failed: {e}", flush=True)
 
     input_audio_for_eq = converted_wav if used_openvoice else raw_tts_mp3
 
-    # 4. Parametric Acoustic Polishing & Resonance Matching
+    # 4. Light EQ polishing. Strong boosts make the voice boomy, so keep gains in a narrow range.
     warmth_db = float(profile.get("warmthDb") if profile.get("warmthDb") is not None else 1.8)
     presence_db = float(profile.get("presenceDb") if profile.get("presenceDb") is not None else -0.5)
-
-    # Spectral balance compensation
-    low_ratio = float(profile.get("spectralLowRatio") if profile.get("spectralLowRatio") is not None else 0.33)
-    extra_chest_boost = 1.5 if low_ratio > 0.4 else 0.0
+    warmth_db = max(-3.0, min(3.0, warmth_db))
+    presence_db = max(-4.0, min(4.0, presence_db))
 
     eq_filters = [
-        f"equalizer=f=180:t=q:w=1.0:g={extra_chest_boost:.1f}",
         f"equalizer=f=320:t=q:w=1.2:g={warmth_db:.1f}",
         f"equalizer=f=3200:t=q:w=1.4:g={presence_db:.1f}",
         "loudnorm=I=-16:TP=-1.5:LRA=10"

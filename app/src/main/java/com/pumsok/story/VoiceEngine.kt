@@ -16,7 +16,7 @@ data class VoiceProfile(
     val trainedAt: Long,          // Timestamp of training
     val isTrained: Boolean,
     val pitchOffsetHz: Int = 0,   // User fine-tuning: -40 ~ +40 Hz
-    val tau: Float = 0.22f,        // Neural clone transfer strength: 0.10 ~ 0.45
+    val tau: Float = 0.3f,         // OpenVoice sampling noise scale: 0.10 ~ 0.40 (lower = cleaner)
     val warmthDb: Float = 2.0f,   // Resonance warmth: -4.0 ~ +6.0 dB
     val presenceDb: Float = -0.5f,// Presence / clarity: -4.0 ~ +4.0 dB
     val speedRate: String = if (roleKey == "FATHER") "-6%" else "-8%",
@@ -45,7 +45,7 @@ data class VoiceProfile(
                     trainedAt = extract("trainedAt")?.toLongOrNull() ?: 0L,
                     isTrained = extract("isTrained")?.toBoolean() ?: false,
                     pitchOffsetHz = extract("pitchOffsetHz")?.toIntOrNull() ?: 0,
-                    tau = extract("tau")?.toFloatOrNull() ?: 0.22f,
+                    tau = extract("tau")?.toFloatOrNull() ?: 0.3f,
                     warmthDb = extract("warmthDb")?.toFloatOrNull() ?: 2.0f,
                     presenceDb = extract("presenceDb")?.toFloatOrNull() ?: -0.5f,
                     speedRate = extract("speedRate") ?: (if (role == "FATHER") "-6%" else "-8%"),
@@ -65,7 +65,7 @@ data class VoiceProfile(
             trainedAt = 0L,
             isTrained = false,
             pitchOffsetHz = 0,
-            tau = 0.22f,
+            tau = 0.3f,
             warmthDb = 2.0f,
             presenceDb = -0.5f,
             speedRate = if (roleKey == "FATHER") "-6%" else "-8%"
