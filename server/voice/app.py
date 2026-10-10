@@ -4,6 +4,7 @@ import shutil
 import hashlib
 import json
 import subprocess
+from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +12,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 import engine
 
-app = FastAPI(title="Pumsok Story Neural Voice Cloning API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(_app):
+    migrate_speaker_embeddings()
+    yield
+
+
+app = FastAPI(title="Pumsok Story Neural Voice Cloning API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,7 +37,6 @@ for d in [REFS_DIR, PROFILES_DIR, CACHE_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
-@app.on_event("startup")
 def migrate_speaker_embeddings():
     """Re-extracts embeddings made by an older extractor (e.g. before silence trimming)."""
     for name in os.listdir(PROFILES_DIR):
