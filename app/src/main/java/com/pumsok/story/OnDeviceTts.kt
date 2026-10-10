@@ -105,7 +105,8 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
             v = out[2] as OnnxTensor
             yEmb = out[3] as OnnxTensor
             val logits = (out[4] as OnnxTensor).floatBuffer
-            val sample = (out[5] as OnnxTensor).longBuffer.get(0)
+            // samples is int32 in the exported graph (y is int64), so read it as an int buffer.
+            val sample = (out[5] as OnnxTensor).intBuffer.get(0).toLong()
             if (argmax(logits) == eos.toInt() || sample == eos) break
             steps++
         }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.pumsok.story"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.6.0"
+        versionCode = 13
+        versionName = "0.6.1"
         // ONNX Runtime ships ~35MB per ABI; real phones only need ARM.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
