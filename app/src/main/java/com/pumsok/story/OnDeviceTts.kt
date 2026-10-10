@@ -21,7 +21,7 @@ import java.util.Random
  *
  * The bundle is produced on the server: the reference voice is precomputed (voice.json, ge.bin)
  * and test sentences carry phoneme ids, so the device only runs the GPT encoder/decoders and
- * the SoVITS decoder. Mirrors scripts/ort_infer.py in the bench.
+ * the SoVITS decoder. Mirrors scripts/ort_infer_kv.py in the bench.
  */
 class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
     class Result(val audio: FloatArray, val tokens: Int, val gptMs: Long, val vitsMs: Long)
@@ -40,11 +40,12 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
 
     private val encoder: OrtSession
     private val firstStage: OrtSession
-    private val stage: OrtSession
+    private val step: OrtSession
     private val vits: OrtSession
     val loadMs: Long
 
     init {
+        require(manifest.optInt("format", 1) >= 2) { "이 앱 버전과 맞지 않는 모델 번들입니다. 번들을 다시 받아 주세요." }
         val voice = JSONObject(File(dir, "voice.json").readText())
         refPhones = voice.getJSONArray("ref_phones").toLongArray()
         promptSemantic = voice.getJSONArray("prompt_semantic").toLongArray()
@@ -60,8 +61,8 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         }
         encoder = env.createSession(File(dir, "t2s_encoder.onnx").path, opts)
-        firstStage = env.createSession(File(dir, "t2s_fsdec.onnx").path, opts)
-        stage = env.createSession(File(dir, "t2s_sdec.onnx").path, opts)
+        firstStage = env.createSession(File(dir, "t2s_fs2.onnx").path, opts)
+        step = env.createSession(File(dir, "t2s_step.onnx").path, opts)
         vits = env.createSession(File(dir, "vits.onnx").path, opts)
         loadMs = System.currentTimeMillis() - t0
     }
@@ -76,50 +77,68 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
         }
     }
 
+    /**
+     * GPT decoding with an append-only KV cache: the step model returns only the new token's
+     * keys/values ([1, layers, 512]); they are appended to direct buffers laid out [row, layer, 512]
+     * so each step can pass the used prefix without rebuilding the cache.
+     */
     private fun run(textPhones: LongArray, seed: Long, own: (OnnxTensor) -> OnnxTensor): Result {
         val allPhones = refPhones + textPhones
         val n = allPhones.size.toLong()
+        val rng = Random(seed)
         val t0 = System.currentTimeMillis()
 
         val xEmb = encoder.run(mapOf(
             "x" to own(longTensor(allPhones, longArrayOf(1, n))),
             "bert" to own(OnnxTensor.createTensor(env, FloatBuffer.allocate((1024 * n).toInt()), longArrayOf(1, 1024, n))),
         ))
-        val first = firstStage.run(mapOf(
+        val y = ArrayList<Long>(promptSemantic.size + maxTokens).apply { promptSemantic.forEach { add(it) } }
+        var rows: Int
+        var rowSize: Int
+        val kBuf: FloatBuffer
+        val vBuf: FloatBuffer
+        var token: Long
+        firstStage.run(mapOf(
             "x" to xEmb[0] as OnnxTensor,
             "prompts" to own(longTensor(promptSemantic, longArrayOf(1, promptSemantic.size.toLong()))),
-        ))
-        val xExample = first[4] as OnnxTensor
-        var prev: OrtSession.Result? = null
-        var y = first[0] as OnnxTensor
-        var k = first[1] as OnnxTensor
-        var v = first[2] as OnnxTensor
-        var yEmb = first[3] as OnnxTensor
+        )).use { first ->
+            val k0 = first[1] as OnnxTensor
+            val shape = k0.info.shape  // [rows, layers, 512]
+            rows = shape[0].toInt()
+            rowSize = (shape[1] * shape[2]).toInt()
+            val capacity = (rows + maxTokens) * rowSize
+            kBuf = directFloats(capacity).apply { put(k0.floatBuffer) }
+            vBuf = directFloats(capacity).apply { put((first[2] as OnnxTensor).floatBuffer) }
+            token = sample((first[0] as OnnxTensor).floatBuffer, y, rng).first
+        }
+        xEmb.close()
+        y += token
+
         var steps = 1
         while (steps < maxTokens) {
-            val out = stage.run(mapOf("iy" to y, "ik" to k, "iv" to v, "iy_emb" to yEmb, "ix_example" to xExample))
-            prev?.close()
-            prev = out
-            y = out[0] as OnnxTensor
-            k = out[1] as OnnxTensor
-            v = out[2] as OnnxTensor
-            yEmb = out[3] as OnnxTensor
-            val logits = (out[4] as OnnxTensor).floatBuffer
-            // samples is int32 in the exported graph (y is int64), so read it as an int buffer.
-            val sample = (out[5] as OnnxTensor).intBuffer.get(0).toLong()
-            if (argmax(logits) == eos.toInt() || sample == eos) break
+            val cacheShape = longArrayOf(rows.toLong(), (rowSize / 512).toLong(), 512)
+            val done = step.run(mapOf(
+                "token" to own(longTensor(longArrayOf(token), longArrayOf(1, 1))),
+                "pos" to own(OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(y.size.toFloat())), longArrayOf(1))),
+                "k_cache" to own(OnnxTensor.createTensor(env, prefix(kBuf, rows * rowSize), cacheShape)),
+                "v_cache" to own(OnnxTensor.createTensor(env, prefix(vBuf, rows * rowSize), cacheShape)),
+            )).use { out ->
+                kBuf.position(rows * rowSize); kBuf.put((out[1] as OnnxTensor).floatBuffer)
+                vBuf.position(rows * rowSize); vBuf.put((out[2] as OnnxTensor).floatBuffer)
+                rows++
+                val (next, eosGreedy) = sample((out[0] as OnnxTensor).floatBuffer, y, rng)
+                token = next
+                y += token
+                eosGreedy || token == eos
+            }
+            if (done) break
             steps++
         }
-        val yAll = LongArray(y.info.shape[1].toInt()).also { y.longBuffer.get(it) }
-        prev?.close()
-        first.close()
-        xEmb.close()
-        val codes = yAll.copyOfRange(yAll.size - steps, yAll.size)
+        val codes = LongArray(steps) { y[y.size - steps + it] }
         codes[codes.size - 1] = 0
         val gptMs = System.currentTimeMillis() - t0
 
         val t1 = System.currentTimeMillis()
-        val rng = Random(seed)
         val noiseLen = interChannels * codes.size * 2
         val noise = FloatArray(noiseLen) { rng.nextGaussian().toFloat() }
         val audio = vits.run(mapOf(
@@ -134,24 +153,49 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
         return Result(audio, steps, gptMs, System.currentTimeMillis() - t1)
     }
 
+    /**
+     * Same sampling as the GPT-SoVITS PyTorch inference path: repetition penalty 1.35 over all
+     * previous tokens, top-k 15, then multinomial via an exponential race.
+     * Returns the sampled token and whether the penalized argmax is EOS (the original stop rule).
+     */
+    private fun sample(logitsBuf: FloatBuffer, previous: List<Long>, rng: Random): Pair<Long, Boolean> {
+        val logits = DoubleArray(logitsBuf.limit()) { logitsBuf.get(it).toDouble() }
+        for (t in previous.toHashSet()) {
+            val i = t.toInt()
+            logits[i] = if (logits[i] < 0) logits[i] * REPETITION_PENALTY else logits[i] / REPETITION_PENALTY
+        }
+        var best = 0
+        for (i in logits.indices) if (logits[i] > logits[best]) best = i
+        val pivot = logits.sortedArrayDescending()[TOP_K - 1]
+        val max = logits[best]
+        var chosen = best
+        var chosenScore = Double.NEGATIVE_INFINITY
+        for (i in logits.indices) {
+            if (logits[i] < pivot) continue
+            // probs are proportional to exp(logit - max); dividing by Exp(1) noise samples them.
+            val score = Math.exp(logits[i] - max) / -Math.log(1.0 - rng.nextDouble())
+            if (score > chosenScore) { chosenScore = score; chosen = i }
+        }
+        return chosen.toLong() to (best.toLong() == eos)
+    }
+
+    private fun directFloats(count: Int): FloatBuffer =
+        ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+
+    private fun prefix(buf: FloatBuffer, count: Int): FloatBuffer =
+        buf.duplicate().apply { position(0); limit(count) }.slice()
+
     private fun longTensor(data: LongArray, shape: LongArray) =
         OnnxTensor.createTensor(env, LongBuffer.wrap(data), shape)
 
-    private fun argmax(buf: FloatBuffer): Int {
-        var best = 0
-        var bestValue = Float.NEGATIVE_INFINITY
-        for (i in 0 until buf.limit()) {
-            val value = buf.get(i)
-            if (value > bestValue) { bestValue = value; best = i }
-        }
-        return best
-    }
-
     override fun close() {
-        encoder.close(); firstStage.close(); stage.close(); vits.close()
+        encoder.close(); firstStage.close(); step.close(); vits.close()
     }
 
     companion object {
+        private const val TOP_K = 15
+        private const val REPETITION_PENALTY = 1.35
+
         private fun JSONArray.toLongArray() = LongArray(length()) { getLong(it) }
 
         /** Downloads every file in the bundle manifest into [dir], skipping files already verified. */
@@ -179,6 +223,9 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
                 onProgress(name, done.toFloat() / total)
             }
             File(dir, "manifest.json").writeText(manifestText)
+            // Drop files from an older bundle layout so they don't keep using storage.
+            val keep = files.keys().asSequence().toSet() + "manifest.json"
+            dir.listFiles()?.filter { it.isFile && it.name !in keep && !it.name.startsWith("bench_") }?.forEach { it.delete() }
         }
 
         private fun fetchText(url: String): String {
