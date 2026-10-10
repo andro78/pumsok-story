@@ -33,7 +33,6 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.MessageDigest
 
 private const val BENCH_REPORT_URL = "https://d32.org/api/voice/bench"
 
@@ -124,8 +123,7 @@ private fun runBench(
     onStatus: (String, Float) -> Unit,
     onRow: (BenchRow) -> Unit,
 ) {
-    val key = MessageDigest.getInstance("SHA-256").digest(bundleUrl.toByteArray()).take(8).joinToString("") { "%02x".format(it) }
-    val dir = File(context.filesDir, "ondevice/$key")
+    val dir = OnDeviceTts.bundleDir(context, bundleUrl)
     val results = JSONArray()
     try {
         OnDeviceTts.download(bundleUrl, dir) { name, p -> onStatus("모델 내려받는 중… $name (${(p * 100).toInt()}%)", p) }

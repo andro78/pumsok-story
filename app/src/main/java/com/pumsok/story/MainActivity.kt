@@ -6,6 +6,7 @@ import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +29,7 @@ private const val NEURAL_ENGINE_VERSION = 3
 
 class MainActivity : ComponentActivity() {
     private val updater by lazy { Updater(this) }
+    private val onDeviceBook by lazy { OnDeviceBook(this) }
     private val executor = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences("reader", MODE_PRIVATE) }
     private var story by mutableStateOf<Story?>(null)
@@ -571,6 +573,8 @@ class MainActivity : ComponentActivity() {
                 TextButton(onClick = { move(1) }, enabled = index < book.paragraphs.lastIndex) { Text("다음 문단 →") }
             }
 
+            OnDeviceBookCard(book)
+
             if (currentProfile.isTrained) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F8E9)),
@@ -675,6 +679,67 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    @Composable private fun OnDeviceBookCard(book: Story) {
+        val ob = onDeviceBook
+        LaunchedEffect(book) { ob.attach(book) }
+        LaunchedEffect(ob.running) {
+            // Generating a whole book takes minutes; keep the screen (and the app) in the foreground.
+            if (ob.running) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD)),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("📱 온디바이스로 책 전체 만들기", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1565C0))
+                Text(
+                    "‘${book.title}’ ${book.paragraphs.size}문단을 이 기기에서 목소리로 만들어 저장해요. 한 번 만들어 두면 인터넷 없이 들을 수 있어요. 만드는 동안은 화면을 켜 둘게요.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                if (ob.bundleUrl.isBlank()) {
+                    Text("먼저 왼쪽(위)의 ‘🧪 온디바이스 엔진 테스트’에 모델 번들 주소를 넣어 주세요.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                LinearProgressIndicator(progress = { ob.progress }, modifier = Modifier.fillMaxWidth())
+                Text("${ob.readyCount}/${ob.total} 문단 준비됨", style = MaterialTheme.typography.labelMedium)
+                if (ob.status.isNotBlank()) Text(ob.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (ob.running) {
+                        OutlinedButton(onClick = { ob.stop() }) { Text("만들기 중지") }
+                    } else {
+                        Button(
+                            onClick = { ob.start(book) },
+                            enabled = ob.bundleUrl.isNotBlank() && ob.readyCount < ob.total && !recording && !isTraining,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
+                        ) {
+                            Text(if (ob.readyCount == 0) "📱 책 전체 만들기" else "📱 이어서 만들기")
+                        }
+                    }
+                    Button(
+                        onClick = { playOnDeviceFrom(index) },
+                        enabled = ob.readyCount > 0 && ob.fileFor(index) != null && !recording
+                    ) {
+                        Text("▶ 여기서부터 듣기")
+                    }
+                }
+            }
+        }
+    }
+
+    /** Plays generated paragraphs from [start], turning pages as it goes, until one is missing. */
+    private fun playOnDeviceFrom(start: Int) {
+        val book = story ?: return
+        val file = onDeviceBook.fileFor(start) ?: run { message = "아직 만들지 않은 문단이에요."; return }
+        if (index != start) {
+            index = start
+            prefs.edit().putInt("index", index).apply()
+        }
+        playFile(file) {
+            val next = start + 1
+            if (next <= book.paragraphs.lastIndex && onDeviceBook.fileFor(next) != null) playOnDeviceFrom(next)
         }
     }
 

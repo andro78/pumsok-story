@@ -198,6 +198,12 @@ class OnDeviceTts(private val dir: File, threads: Int) : AutoCloseable {
 
         private fun JSONArray.toLongArray() = LongArray(length()) { getLong(it) }
 
+        /** Where a bundle downloaded from [bundleUrl] is stored on this device. */
+        fun bundleDir(context: android.content.Context, bundleUrl: String): File {
+            val key = MessageDigest.getInstance("SHA-256").digest(bundleUrl.toByteArray()).take(8).joinToString("") { "%02x".format(it) }
+            return File(context.filesDir, "ondevice/$key")
+        }
+
         /** Downloads every file in the bundle manifest into [dir], skipping files already verified. */
         fun download(baseUrl: String, dir: File, onProgress: (String, Float) -> Unit) {
             dir.mkdirs()

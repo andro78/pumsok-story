@@ -5,7 +5,7 @@ import hashlib
 import json
 import subprocess
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -341,3 +341,19 @@ async def report_bench(request: Request):
     with open(BENCH_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(result, ensure_ascii=False) + "\n")
     return {"status": "ok"}
+
+
+class PhonemeRequest(BaseModel):
+    paragraphs: List[str]
+
+
+@app.post("/api/voice/phonemes")
+def phonemes(req: PhonemeRequest):
+    """Converts story paragraphs into sentence segments with GPT-SoVITS phoneme ids for on-device synthesis."""
+    if len(req.paragraphs) > 500 or sum(len(p) for p in req.paragraphs) > 300_000:
+        raise HTTPException(status_code=413, detail="한 번에 보낼 수 있는 문단 수나 글자 수를 넘었습니다.")
+    import phonemes as ph  # heavy (mecab); loaded on first use
+    return {
+        "version": ph.PHONEME_VERSION,
+        "paragraphs": [ph.phonemize(p[:5000]) for p in req.paragraphs],
+    }
