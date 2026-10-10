@@ -514,6 +514,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        OnDeviceBenchCard(enabled = !recording && !isTraining, playFile = { playFile(it) })
+
         if (message.isNotBlank()) Text(message, Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.primary)
     }
 

@@ -6,7 +6,7 @@ import json
 import subprocess
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -32,6 +32,7 @@ DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 REFS_DIR = os.path.join(DATA_DIR, "references")
 PROFILES_DIR = os.path.join(DATA_DIR, "profiles")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
+BENCH_LOG = os.path.join(DATA_DIR, "bench", "results.jsonl")
 
 for d in [REFS_DIR, PROFILES_DIR, CACHE_DIR]:
     os.makedirs(d, exist_ok=True)
@@ -321,3 +322,22 @@ def list_profiles():
             with open(os.path.join(PROFILES_DIR, f), "r", encoding="utf-8") as fp:
                 results.append(json.load(fp))
     return results
+
+
+@app.post("/api/voice/bench")
+async def report_bench(request: Request):
+    """Stores on-device engine benchmark results sent by the app (one JSON object per line)."""
+    body = await request.body()
+    if len(body) > 64 * 1024:
+        raise HTTPException(status_code=413, detail="결과가 너무 큽니다.")
+    try:
+        result = json.loads(body)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="JSON 형식이 아닙니다.")
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=400, detail="JSON 객체여야 합니다.")
+    result["receivedAt"] = int(time.time())
+    os.makedirs(os.path.dirname(BENCH_LOG), exist_ok=True)
+    with open(BENCH_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    return {"status": "ok"}

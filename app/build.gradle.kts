@@ -12,9 +12,12 @@ android {
         applicationId = "com.pumsok.story"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.5.3"
+        versionCode = 12
+        versionName = "0.6.0"
+        // ONNX Runtime ships ~35MB per ABI; real phones only need ARM.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
+    packaging { jniLibs { useLegacyPackaging = true } }
     buildFeatures { compose = true }
     val keystoreFile = rootProject.file("keystore.properties")
     val uploadSigning = if (keystoreFile.exists()) {
@@ -45,5 +48,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("org.jsoup:jsoup:1.18.3")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
     testImplementation("junit:junit:4.13.2")
 }
