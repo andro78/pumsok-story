@@ -58,13 +58,11 @@ class OnDeviceBook(private val context: Context) {
 
     fun start(story: Story, onParagraphReady: (Int) -> Unit = {}) {
         if (running || bundleUrl.isBlank()) return
-        val d = bookDir(story).also { it.mkdirs() }
-        dir = d
         cancel.set(false)
         running = true
         Thread {
             try {
-                generate(story, d, onParagraphReady)
+                generate(story, onParagraphReady)
             } catch (e: Throwable) {
                 status = "실패: ${e.message ?: e.javaClass.simpleName}"
             } finally {
@@ -73,9 +71,14 @@ class OnDeviceBook(private val context: Context) {
         }.start()
     }
 
-    private fun generate(story: Story, d: File, onParagraphReady: (Int) -> Unit) {
+    private fun generate(story: Story, onParagraphReady: (Int) -> Unit) {
         val bundleDir = OnDeviceTts.bundleDir(context, bundleUrl)
         OnDeviceTts.download(bundleUrl, bundleDir) { name, p -> status = "모델 확인 중… $name (${(p * 100).toInt()}%)" }
+        // The voice may have changed with the download, so pick the book folder only now.
+        val d = bookDir(story).also { it.mkdirs() }
+        dir = d
+        readyCount = story.paragraphs.indices.count { paragraphFile(d, it).exists() }
+        progress = readyCount.toFloat() / total
 
         val segments = loadPhonemes(story, d)
         status = "목소리 엔진을 불러오는 중…"
@@ -144,9 +147,12 @@ class OnDeviceBook(private val context: Context) {
     }
 
     private fun bookDir(story: Story): File {
-        // Keyed by text and voice bundle, so editing the book or changing the voice regenerates audio.
+        // Keyed by text and voice, so editing the book or retraining the voice regenerates audio.
+        // The voice is the downloaded bundle's id (the URL can stay the same across retrains).
+        val manifest = File(OnDeviceTts.bundleDir(context, bundleUrl), "manifest.json")
+        val voiceId = runCatching { JSONObject(manifest.readText()).optString("bundle_id") }.getOrNull()
         val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(bundleUrl.toByteArray())
+        digest.update((voiceId?.ifBlank { null } ?: bundleUrl).toByteArray())
         digest.update(story.title.toByteArray())
         story.paragraphs.forEach { digest.update(0); digest.update(it.toByteArray()) }
         val key = digest.digest().take(10).joinToString("") { "%02x".format(it) }

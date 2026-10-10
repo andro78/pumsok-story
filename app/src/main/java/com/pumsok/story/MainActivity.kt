@@ -712,10 +712,15 @@ class MainActivity : ComponentActivity() {
                     } else {
                         Button(
                             onClick = { ob.start(book) },
-                            enabled = ob.bundleUrl.isNotBlank() && ob.readyCount < ob.total && !recording && !isTraining,
+                            enabled = ob.bundleUrl.isNotBlank() && !recording && !isTraining,
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
                         ) {
-                            Text(if (ob.readyCount == 0) "📱 책 전체 만들기" else "📱 이어서 만들기")
+                            // When the book is complete this re-checks the voice bundle; a retrained voice regenerates it.
+                            Text(when {
+                                ob.readyCount == 0 -> "📱 책 전체 만들기"
+                                ob.readyCount < ob.total -> "📱 이어서 만들기"
+                                else -> "🔄 새 목소리 확인"
+                            })
                         }
                     }
                     Button(
