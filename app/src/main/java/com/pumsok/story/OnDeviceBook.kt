@@ -81,6 +81,8 @@ class OnDeviceBook(private val context: Context) {
         progress = readyCount.toFloat() / total
 
         val segments = loadPhonemes(story, d)
+        CrashReporter.breadcrumb(context, "book voice=${sel.voiceId(context)} lora=${sel.voiceDir?.let { File(it, "lora.bin").exists() }} " +
+            "accel=${prefs.getString("ondevice_accel", "cpu")} vits=${File(bundleDir, "vits.onnx").length()}")
         status = "목소리 엔진을 불러오는 중…"
         val threads = prefs.getInt("ondevice_threads", 6)
         OnDeviceTts(bundleDir, threads, sel.voiceDir ?: bundleDir, prefs.getString("ondevice_accel", "cpu") ?: "cpu").use { tts ->
@@ -109,6 +111,7 @@ class OnDeviceBook(private val context: Context) {
             }
         }
         status = "책 전체가 준비됐어요. 인터넷 없이 들을 수 있어요."
+        CrashReporter.clear(context)
     }
 
     /** Phoneme ids per paragraph segment, fetched once from the server and cached with the book. */

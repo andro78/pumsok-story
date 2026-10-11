@@ -115,6 +115,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashReporter.install(this)
+        CrashReporter.reportPending(this)
         updater.checkOnLaunch()
         speakers = Speakers.load(this)
         speakerId = prefs.getString("speaker", null) ?: prefs.getString("role", null) ?: speakers.firstOrNull()?.id ?: ""
@@ -651,8 +653,10 @@ class MainActivity : ComponentActivity() {
         voiceProgress = 0f
         voiceStatus = start
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        CrashReporter.breadcrumb(this, "voice-job $start threads=$threads accel=${prefs.getString("ondevice_accel", "cpu")}")
         Thread {
             val result = runCatching { job { s, p -> runOnUiThread { voiceStatus = s; voiceProgress = p } } }
+            CrashReporter.clear(this)
             runOnUiThread {
                 voiceStatus = result.getOrElse { "실패: ${it.message ?: it.javaClass.simpleName}" }
                 voiceWorking = false
@@ -691,9 +695,14 @@ class MainActivity : ComponentActivity() {
                 val sample = JSONArray(File(baseDir, "bench.json").readText()).getJSONObject(0)
                 val phones = sample.getJSONArray("phones").let { a -> LongArray(a.length()) { a.getLong(it) } }
                 val wav = File(cacheDir, "voice_preview.wav")
+                val voiceDir = OnDeviceVoices.localDir(this, sp.id)
+                CrashReporter.breadcrumb(this, "preview lora=${File(voiceDir, "lora.bin").exists()} " +
+                    "accel=${prefs.getString("ondevice_accel", "cpu")} threads=$threads vits=${File(baseDir, "vits.onnx").length()} " +
+                    "base=${runCatching { org.json.JSONObject(File(baseDir, "manifest.json").readText()).optString("bundle_id") }.getOrNull()}")
                 OnDeviceTts(baseDir, threads, OnDeviceVoices.localDir(this, sp.id), prefs.getString("ondevice_accel", "cpu") ?: "cpu").use { t ->
                     OnDeviceTts.writeWav(wav, t.synthesize(phones).audio, t.sampleRate)
                 }
+                CrashReporter.clear(this)
                 sample.getString("text") to wav
             }
             runOnUiThread {
