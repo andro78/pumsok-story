@@ -33,7 +33,6 @@ private val Green = Color(0xFF2E7D32)
 private val Purple = Color(0xFF6A1B9A)
 
 class MainActivity : ComponentActivity() {
-    enum class SpeakerRole(val label: String) { MOTHER("엄마"), FATHER("아빠") }
     private class VoiceChoice(val key: String, val label: String)
 
     private val updater by lazy { Updater(this) }
@@ -56,8 +55,13 @@ class MainActivity : ComponentActivity() {
     private var samples by mutableStateOf<List<Pair<String, String>>>(emptyList())
 
     // Voice tab
-    private val totalSteps = 8
-    private var role by mutableStateOf(SpeakerRole.MOTHER)
+    private val totalSteps = Speakers.SCRIPT.size
+    private var speakers by mutableStateOf<List<Speaker>>(emptyList())
+    private var speakerId by mutableStateOf("MOTHER")
+    private val speaker: Speaker? get() = speakers.firstOrNull { it.id == speakerId } ?: speakers.firstOrNull()
+    private var recordStartedAt by mutableLongStateOf(0L)
+    private var speakerDialog by mutableStateOf<String?>(null)  // "add" | "rename" | "delete"
+    private var dialogName by mutableStateOf("")
     private var consent by mutableStateOf(false)
     private var currentStep by mutableIntStateOf(0)
     private var stepRecorded by mutableStateOf(List(8) { false })
@@ -73,20 +77,11 @@ class MainActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
     private var ttsReady by mutableStateOf(false)
 
-    private fun stepScript(step: Int, r: SpeakerRole): String = when (step) {
-        0 -> "우리 아가, 오늘 하루도 재미있고 씩씩하게 잘 보냈니?"
-        1 -> "창밖으로 별들이 반짝이고, 달님이 은은하게 미소를 짓는 밤이야."
-        2 -> "${r.label}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 여행을 떠나보자."
-        3 -> "오늘 숲속에서는 어떤 신기하고 재미있는 일들이 일어났을까?"
-        4 -> "와아! 알록달록 무지개 언덕에 달콤한 열매들이 가득 열렸네!"
-        5 -> "쉿, 아기 곰이 새근새근 잠들었으니 발소리를 죽이고 조용히 걸어가자."
-        6 -> "아무 걱정하지 마렴, 언제나 ${r.label}가 네 곁에서 든든하게 지켜줄게."
-        7 -> "사랑하는 우리 아가, 오늘 밤도 예쁜 꿈 꾸렴. 편안하게 잘 자렴."
-        else -> ""
+    private fun stepFile(id: String, step: Int) = Speakers.recording(this, id, step)
+    private fun refreshRecorded() {
+        val id = speaker?.id
+        stepRecorded = (0 until totalSteps).map { id != null && stepFile(id, it).exists() }
     }
-
-    private fun stepFile(r: SpeakerRole, step: Int) = File(filesDir, "voice_${r.name}_$step.m4a")
-    private fun clips(r: SpeakerRole) = (0 until totalSteps).map { stepFile(r, it) to stepScript(it, r) }
 
     private val microphone = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         if (it && consent) startRecording() else message = "녹음하려면 마이크 권한과 동의가 필요해요."
@@ -121,10 +116,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         updater.checkOnLaunch()
-        role = if (prefs.getString("role", "MOTHER") == "FATHER") SpeakerRole.FATHER else SpeakerRole.MOTHER
+        speakers = Speakers.load(this)
+        speakerId = prefs.getString("speaker", null) ?: prefs.getString("role", null) ?: speakers.firstOrNull()?.id ?: ""
         migrateRecordings()
+        Speakers.migrateOldRecordings(this)
         consent = prefs.getBoolean("consent", false)
-        stepRecorded = (0 until totalSteps).map { stepFile(role, it).exists() }
+        refreshRecorded()
         readerVoice = prefs.getString("reader_voice", null) ?: defaultReaderVoice()
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
@@ -167,7 +164,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     bottomBar = {
                         NavigationBar {
-                            listOf("📖" to "동화", "🎙️" to "목소리", "⚙️" to "설정").forEachIndexed { i, (icon, label) ->
+                            listOf("📖" to "동화", "🎙️" to "모델", "⚙️" to "설정").forEachIndexed { i, (icon, label) ->
                                 NavigationBarItem(
                                     selected = tab == i,
                                     onClick = { tab = i },
@@ -197,11 +194,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Recordings used to be shared by both roles; keep them for the role that was selected. */
+    /** Recordings were once shared by both roles; keep them for the role that was selected. */
     private fun migrateRecordings() {
-        (0 until totalSteps).forEach { step ->
+        val id = prefs.getString("role", "MOTHER") ?: "MOTHER"
+        (0 until 8).forEach { step ->
             val old = File(filesDir, "voice_step_$step.m4a")
-            if (old.exists() && !stepFile(role, step).exists()) old.renameTo(stepFile(role, step))
+            if (old.exists() && !stepFile(id, step).exists()) old.renameTo(stepFile(id, step))
         }
     }
 
@@ -209,10 +207,10 @@ class MainActivity : ComponentActivity() {
 
     private fun voiceChoices(): List<VoiceChoice> {
         val list = mutableListOf<VoiceChoice>()
-        SpeakerRole.entries.forEach { r ->
-            if (OnDeviceVoices.hasLocal(this, r.name)) {
-                val kind = if (OnDeviceVoices.isTrained(this, r.name)) "기기 학습" else "빠르게 만든"
-                list += VoiceChoice("local:${r.name}", "${r.label} 목소리 ($kind)")
+        speakers.forEach { sp ->
+            if (OnDeviceVoices.hasLocal(this, sp.id)) {
+                val kind = if (OnDeviceVoices.isTrained(this, sp.id)) "더 닮게 학습" else "기본"
+                list += VoiceChoice("local:${sp.id}", "${sp.name} ($kind)")
             }
         }
         if (OnDeviceVoices.serverBundleUrl(this).isNotBlank()) list += VoiceChoice("server", "서버에서 학습한 목소리")
@@ -281,7 +279,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (choices.size == 1) {
-                    Text("‘🎙️ 목소리’ 탭에서 엄마·아빠 목소리를 만들면 여기서 고를 수 있어요.", style = MaterialTheme.typography.bodySmall)
+                    Text("‘🎙️ 모델’ 탭에서 가족 목소리 모델을 만들면 여기서 고를 수 있어요.", style = MaterialTheme.typography.bodySmall)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (reading) {
@@ -393,23 +391,35 @@ class MainActivity : ComponentActivity() {
 
     // ---------------------------------------------------------------- 🎙️ Voice
 
+    @OptIn(ExperimentalLayoutApi::class)
     @Composable private fun VoiceTab() {
-        Text("목소리 만들기", style = MaterialTheme.typography.headlineMedium)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SpeakerRole.entries.forEach { r ->
+        Text("목소리 모델 만들기", style = MaterialTheme.typography.headlineMedium)
+        Text("가족 목소리를 ${Speakers.MAX}명까지 만들 수 있어요. 누구 목소리를 만들까요?", style = MaterialTheme.typography.bodyMedium)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            speakers.forEach { sp ->
                 FilterChip(
-                    selected = role == r,
-                    onClick = {
-                        role = r
-                        prefs.edit().putString("role", r.name).apply()
-                        stepRecorded = (0 until totalSteps).map { stepFile(r, it).exists() }
-                        currentStep = stepRecorded.indexOfFirst { !it }.coerceAtLeast(0)
-                        voiceStatus = ""
-                    },
-                    label = { Text("${r.label} 목소리") },
+                    selected = speaker?.id == sp.id,
+                    onClick = { selectSpeaker(sp.id) },
+                    label = { Text(sp.name + if (OnDeviceVoices.hasLocal(this@MainActivity, sp.id)) " ✓" else "") },
                     enabled = !recording && !voiceWorking
                 )
             }
+            if (speakers.size < Speakers.MAX) {
+                AssistChip(
+                    onClick = { dialogName = ""; speakerDialog = "add" },
+                    label = { Text("+ 추가") },
+                    enabled = !recording && !voiceWorking
+                )
+            }
+        }
+        SpeakerDialogs()
+        val sp = speaker ?: run {
+            Text("‘+ 추가’를 눌러 목소리를 만들 사람을 정해 주세요.", style = MaterialTheme.typography.bodySmall)
+            return
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(onClick = { dialogName = sp.name; speakerDialog = "rename" }, enabled = !recording && !voiceWorking) { Text("이름 바꾸기") }
+            TextButton(onClick = { speakerDialog = "delete" }, enabled = !recording && !voiceWorking) { Text("삭제", color = MaterialTheme.colorScheme.error) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(consent, onCheckedChange = { consent = it; prefs.edit().putBoolean("consent", it).apply() }, enabled = !recording)
@@ -417,34 +427,94 @@ class MainActivity : ComponentActivity() {
         }
 
         val recordedCount = stepRecorded.count { it }
-        val hasVoice = remember(voiceVersion, role) { OnDeviceVoices.hasLocal(this, role.name) }
-        val trained = remember(voiceVersion, role) { OnDeviceVoices.isTrained(this, role.name) }
+        val hasVoice = remember(voiceVersion, sp.id) { OnDeviceVoices.hasLocal(this, sp.id) }
+        val trained = remember(voiceVersion, sp.id) { OnDeviceVoices.isTrained(this, sp.id) }
 
-        StepCard("①", "대본 녹음", done = recordedCount == totalSteps, summary = "$recordedCount / $totalSteps 문장") { RecordingPanel() }
-        StepCard("②", "목소리 만들기", done = hasVoice, summary = if (hasVoice) "완료" else "녹음 1문장부터 가능") {
-            Text("녹음한 문장 하나로 이 기기에서 바로 ${role.label} 목소리를 만들어요. 녹음은 기기 밖으로 나가지 않아요. 처음 한 번 기본 모델(약 750MB)을 내려받으니 Wi-Fi에서 해 주세요.", style = MaterialTheme.typography.bodySmall)
-            Button(onClick = { buildVoice() }, enabled = consent && recordedCount > 0 && !voiceWorking && !recording) {
-                Text(if (hasVoice) "다시 만들기" else "목소리 만들기")
+        StepCard("①", "대본 녹음", done = recordedCount == totalSteps, summary = "$recordedCount / $totalSteps 문장") { RecordingPanel(sp) }
+        StepCard("②", "모델 만들기", done = hasVoice, summary = if (hasVoice) "완료" else "녹음 1문장부터") {
+            Text("녹음한 문장 하나로 ${sp.name} 목소리 모델을 이 기기에서 만들어요. 몇 초면 끝나요. 녹음은 기기 밖으로 나가지 않아요.", style = MaterialTheme.typography.bodySmall)
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF8E1))) {
+                Text(
+                    "💡 기본 모델이란? 수천 명의 목소리로 미리 학습된 공용 음성 AI예요(약 750MB, 처음 한 번만 내려받아요). 여기에는 어떤 가족의 목소리도 들어 있지 않고, 이 기본 모델이 녹음을 분석해서 ${sp.name}만의 목소리 모델을 만들어요. Wi-Fi에서 해 주세요.",
+                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(12.dp)
+                )
+            }
+            Button(onClick = { buildVoice(sp) }, enabled = consent && recordedCount > 0 && !voiceWorking && !recording) {
+                Text(if (hasVoice) "모델 다시 만들기" else "모델 만들기")
             }
         }
-        StepCard("③", "더 닮게 학습 (실험)", done = trained, summary = if (trained) "완료" else "녹음 4문장 이상") {
-            Text("녹음한 문장으로 이 기기에서 말투를 학습해요. 1~3분쯤 걸리고 기기가 따뜻해질 수 있어요. 충전기를 꽂고 화면을 켜 둔 채로 해 주세요.", style = MaterialTheme.typography.bodySmall)
+        StepCard("③", "모델 더 닮게 학습", done = trained, summary = if (trained) "완료" else "녹음 4문장 이상") {
+            Text("녹음한 문장 전부로 ${sp.name}의 말투를 이 기기에서 학습해요. 1~3분쯤 걸리고 기기가 따뜻해질 수 있어요. 충전기를 꽂고 화면을 켜 둔 채로 해 주세요. 많이 녹음할수록 더 닮아요.", style = MaterialTheme.typography.bodySmall)
             Button(
-                onClick = { trainVoice() },
+                onClick = { trainVoice(sp) },
                 enabled = consent && hasVoice && recordedCount >= 4 && !voiceWorking && !recording,
                 colors = ButtonDefaults.buttonColors(containerColor = Purple)
             ) { Text(if (trained) "다시 학습하기" else "학습하기") }
-            if (!hasVoice) Text("먼저 ②를 해 주세요.", style = MaterialTheme.typography.bodySmall)
+            if (!hasVoice) Text("먼저 ② 모델 만들기를 해 주세요.", style = MaterialTheme.typography.bodySmall)
         }
 
         if (voiceWorking) LinearProgressIndicator(progress = { voiceProgress }, modifier = Modifier.fillMaxWidth())
         if (voiceStatus.isNotBlank()) Text(voiceStatus, color = MaterialTheme.colorScheme.primary)
         Button(
-            onClick = { previewVoice() },
+            onClick = { previewVoice(sp) },
             enabled = hasVoice && !voiceWorking && !recording,
             modifier = Modifier.fillMaxWidth().height(52.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Green)
-        ) { Text("🎧 ${role.label} 목소리 들어보기", fontSize = 16.sp) }
+        ) { Text("🎧 ${sp.name} 목소리 들어보기", fontSize = 16.sp) }
+    }
+
+    private fun selectSpeaker(id: String) {
+        speakerId = id
+        prefs.edit().putString("speaker", id).apply()
+        refreshRecorded()
+        currentStep = stepRecorded.indexOfFirst { !it }.coerceAtLeast(0)
+        voiceStatus = ""
+    }
+
+    @OptIn(ExperimentalLayoutApi::class)
+    @Composable private fun SpeakerDialogs() {
+        when (speakerDialog) {
+            "add", "rename" -> AlertDialog(
+                onDismissRequest = { speakerDialog = null },
+                title = { Text(if (speakerDialog == "add") "목소리 추가" else "이름 바꾸기") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedTextField(value = dialogName, onValueChange = { dialogName = it.take(10) }, label = { Text("이름") }, singleLine = true)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Speakers.SUGGESTED.filter { s -> speakers.none { it.name == s } }.take(6).forEach { s ->
+                                SuggestionChip(onClick = { dialogName = s }, label = { Text(s) })
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val sp = speaker
+                        if (speakerDialog == "add") selectSpeaker(Speakers.add(this, dialogName).id.also { speakers = Speakers.load(this) })
+                        else if (sp != null) Speakers.rename(this, sp.id, dialogName)
+                        speakers = Speakers.load(this)
+                        speakerDialog = null
+                        voiceVersion++
+                    }, enabled = dialogName.isNotBlank()) { Text("확인") }
+                },
+                dismissButton = { TextButton(onClick = { speakerDialog = null }) { Text("취소") } }
+            )
+            "delete" -> AlertDialog(
+                onDismissRequest = { speakerDialog = null },
+                title = { Text("${speaker?.name ?: ""} 삭제") },
+                text = { Text("녹음과 목소리 모델을 모두 지워요. 되돌릴 수 없어요.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        speaker?.let { Speakers.delete(this, it.id) }
+                        speakers = Speakers.load(this)
+                        speakers.firstOrNull()?.let { selectSpeaker(it.id) } ?: refreshRecorded()
+                        speakerDialog = null
+                        voiceVersion++
+                    }) { Text("삭제", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = { TextButton(onClick = { speakerDialog = null }) { Text("취소") } }
+            )
+        }
     }
 
     @Composable private fun StepCard(number: String, title: String, done: Boolean, summary: String, content: @Composable ColumnScope.() -> Unit) {
@@ -462,39 +532,62 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable private fun RecordingPanel() {
-        Text("“${stepScript(currentStep, role)}”", style = MaterialTheme.typography.titleMedium)
-        listOf(0..3, 4..7).forEach { range ->
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                range.forEach { step ->
-                    val done = stepRecorded[step]
-                    OutlinedButton(
-                        onClick = { currentStep = step },
-                        enabled = !recording,
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                        colors = if (step == currentStep) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
-                        modifier = Modifier.weight(1f)
-                    ) { Text("${step + 1}${if (done) " ✓" else ""}", fontSize = 13.sp) }
+    @OptIn(ExperimentalLayoutApi::class)
+    @Composable private fun RecordingPanel(sp: Speaker) {
+        val recordedCount = stepRecorded.count { it }
+        LinearProgressIndicator(progress = { recordedCount / totalSteps.toFloat() }, modifier = Modifier.fillMaxWidth())
+        Text("조용한 곳에서, 아이에게 말해 주듯 편안하고 또박또박 읽어 주세요.", style = MaterialTheme.typography.bodySmall)
+        Card(colors = CardDefaults.cardColors(containerColor = Color.White), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("${currentStep + 1}번째 문장 / $totalSteps", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(Speakers.SCRIPT[currentStep], style = MaterialTheme.typography.titleLarge, lineHeight = 32.sp)
+                if (stepRecorded[currentStep] && Speakers.textFor(this@MainActivity, sp.id, currentStep) != Speakers.SCRIPT[currentStep]) {
+                    Text("예전 대본으로 녹음한 문장이에요. 그대로 써도 되고, 다시 녹음해도 돼요.", style = MaterialTheme.typography.bodySmall)
+                }
+                var elapsed by remember { mutableIntStateOf(0) }
+                LaunchedEffect(recording) {
+                    elapsed = 0
+                    while (recording) { kotlinx.coroutines.delay(200); elapsed = ((System.currentTimeMillis() - recordStartedAt) / 1000).toInt() }
+                }
+                Button(
+                    onClick = {
+                        if (recording) finishRecording(sp)
+                        else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
+                        else microphone.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    enabled = consent && !voiceWorking,
+                    shape = androidx.compose.foundation.shape.CircleShape,
+                    modifier = Modifier.size(96.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = if (recording) MaterialTheme.colorScheme.error else Brown)
+                ) { Text(if (recording) "⏹" else "🎙️", fontSize = 34.sp) }
+                Text(
+                    when {
+                        recording -> "녹음 중 ${elapsed}초 · 다 읽으면 눌러 주세요"
+                        stepRecorded[currentStep] -> "녹음했어요 · 다시 누르면 새로 녹음해요"
+                        consent -> "버튼을 누르고 문장을 읽어 주세요"
+                        else -> "녹음하려면 위의 동의에 체크해 주세요"
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { currentStep-- }, enabled = currentStep > 0 && !recording) { Text("← 이전") }
+                    OutlinedButton(onClick = { playFile(stepFile(sp.id, currentStep)) }, enabled = stepRecorded[currentStep] && !recording) { Text("▶ 들어보기") }
+                    TextButton(onClick = { currentStep++ }, enabled = currentStep < totalSteps - 1 && !recording) { Text("다음 →") }
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = {
-                    if (recording) finishRecording()
-                    else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
-                    else microphone.launch(Manifest.permission.RECORD_AUDIO)
-                },
-                enabled = consent && !voiceWorking,
-                colors = if (recording) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors()
-            ) { Text(if (recording) "⏹ 녹음 끝내기" else if (stepRecorded[currentStep]) "🎙️ 다시 녹음" else "🎙️ 녹음 시작") }
-            if (stepRecorded[currentStep] && !recording) {
-                OutlinedButton(onClick = { playFile(stepFile(role, currentStep)) }) { Text("들어보기") }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            (0 until totalSteps).forEach { step ->
+                FilterChip(
+                    selected = step == currentStep,
+                    onClick = { currentStep = step },
+                    label = { Text("${step + 1}${if (stepRecorded[step]) " ✓" else ""}") },
+                    enabled = !recording
+                )
             }
         }
-        if (!consent) Text("녹음하려면 위의 동의에 체크해 주세요.", style = MaterialTheme.typography.bodySmall)
-        if (stepRecorded.any { it }) {
-            TextButton(onClick = { deleteRecordings() }, enabled = !recording && !voiceWorking) { Text("${role.label} 녹음 모두 지우기") }
+        if (recordedCount > 0) {
+            TextButton(onClick = { deleteRecordings(sp) }, enabled = !recording && !voiceWorking) { Text("${sp.name} 녹음 모두 지우기") }
         }
     }
 
@@ -513,22 +606,26 @@ class MainActivity : ComponentActivity() {
             next.prepare(); next.start()
         }.onSuccess {
             recorder = next
+            recordStartedAt = System.currentTimeMillis()
             recording = true
-            voiceStatus = "${currentStep + 1}번 문장을 읽어 주세요. 다 읽으면 ‘녹음 끝내기’를 눌러요."
+            voiceStatus = ""
         }.onFailure {
             next.release(); tmp.delete()
             voiceStatus = "녹음을 시작하지 못했어요."
         }
     }
 
-    private fun finishRecording() {
+    private fun finishRecording(sp: Speaker? = speaker) {
         val active = recorder ?: return
         val pending = File(filesDir, "voice.tmp")
         runCatching {
             active.stop()
-            val target = stepFile(role, currentStep)
+            check(sp != null)
+            check(System.currentTimeMillis() - recordStartedAt > 1500) { "too short" }
+            val target = stepFile(sp.id, currentStep)
             target.delete()
             check(pending.renameTo(target))
+            Speakers.saveText(this, sp.id, currentStep)
             stepRecorded = stepRecorded.toMutableList().also { it[currentStep] = true }
             val done = stepRecorded.count { it }
             voiceStatus = "${currentStep + 1}번 문장을 저장했어요 ($done/$totalSteps)."
@@ -540,12 +637,12 @@ class MainActivity : ComponentActivity() {
         active.release(); recorder = null; recording = false
     }
 
-    private fun deleteRecordings() {
+    private fun deleteRecordings(sp: Speaker) {
         stopAllAudio()
-        (0 until totalSteps).forEach { stepFile(role, it).delete() }
+        Speakers.deleteRecordings(this, sp.id)
         stepRecorded = List(totalSteps) { false }
         currentStep = 0
-        voiceStatus = "${role.label} 녹음을 지웠어요. 만든 목소리는 그대로 있어요."
+        voiceStatus = "${sp.name} 녹음을 지웠어요. 만든 목소리 모델은 그대로 있어요."
     }
 
     private fun runVoiceJob(start: String, job: ((String, Float) -> Unit) -> String) {
@@ -565,28 +662,25 @@ class MainActivity : ComponentActivity() {
         }.start()
     }
 
-    private fun buildVoice() {
-        val r = role
+    private fun buildVoice(sp: Speaker) {
         runVoiceJob("준비 중…") { onStatus ->
-            val info = OnDeviceVoices.build(this, r.name, clips(r), threads, onStatus)
-            runOnUiThread { chooseReaderVoice("local:${r.name}") }
-            "${r.label} 목소리를 만들었어요 (녹음 %.1f초 사용). 아래 ‘들어보기’로 확인해 보세요.".format(info.seconds)
+            val info = OnDeviceVoices.build(this, sp.id, Speakers.clips(this, sp.id), threads, onStatus)
+            runOnUiThread { chooseReaderVoice("local:${sp.id}") }
+            "${sp.name} 목소리 모델을 만들었어요 (녹음 %.1f초 사용). 아래 ‘들어보기’로 확인해 보세요.".format(info.seconds)
         }
     }
 
-    private fun trainVoice() {
-        val r = role
+    private fun trainVoice(sp: Speaker) {
         runVoiceJob("학습 준비 중…") { onStatus ->
-            val info = OnDeviceVoices.train(this, r.name, clips(r), threads, onStatus)
+            val info = OnDeviceVoices.train(this, sp.id, Speakers.clips(this, sp.id), threads, onStatus)
             reportTraining(info)
-            runOnUiThread { chooseReaderVoice("local:${r.name}") }
+            runOnUiThread { chooseReaderVoice("local:${sp.id}") }
             "학습을 마쳤어요 (%.1f분). 아래 ‘들어보기’로 확인해 보세요.".format(info.millis / 60000f)
         }
     }
 
-    /** Synthesizes a sample sentence with [role]'s on-device voice (including trained adapters) and plays it. */
-    private fun previewVoice() {
-        val r = role
+    /** Synthesizes a sample sentence with [sp]'s on-device voice (including trained adapters) and plays it. */
+    private fun previewVoice(sp: Speaker) {
         stopReading()
         voiceWorking = true
         voiceProgress = 0.5f
@@ -597,7 +691,7 @@ class MainActivity : ComponentActivity() {
                 val sample = JSONArray(File(baseDir, "bench.json").readText()).getJSONObject(0)
                 val phones = sample.getJSONArray("phones").let { a -> LongArray(a.length()) { a.getLong(it) } }
                 val wav = File(cacheDir, "voice_preview.wav")
-                OnDeviceTts(baseDir, threads, OnDeviceVoices.localDir(this, r.name), prefs.getString("ondevice_accel", "cpu") ?: "cpu").use { t ->
+                OnDeviceTts(baseDir, threads, OnDeviceVoices.localDir(this, sp.id), prefs.getString("ondevice_accel", "cpu") ?: "cpu").use { t ->
                     OnDeviceTts.writeWav(wav, t.synthesize(phones).audio, t.sampleRate)
                 }
                 sample.getString("text") to wav
