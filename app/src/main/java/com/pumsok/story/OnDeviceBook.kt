@@ -40,10 +40,9 @@ class OnDeviceBook(private val context: Context) {
 
     private val prefs get() = context.getSharedPreferences("reader", Context.MODE_PRIVATE)
 
-    /** Points the state at [story] read in [role]'s voice and counts paragraphs already generated. */
-    fun attach(story: Story, role: String) {
+    /** Points the state at [story] read with [sel] and counts paragraphs already generated. */
+    fun attach(story: Story, sel: OnDeviceVoices.Selection?) {
         if (running) return
-        val sel = OnDeviceVoices.selection(context, role)
         val d = if (sel == null) File(context.filesDir, "ondevice/books/none") else bookDir(story, sel)
         dir = d
         total = story.paragraphs.size
@@ -56,14 +55,14 @@ class OnDeviceBook(private val context: Context) {
 
     fun stop() = cancel.set(true)
 
-    fun start(story: Story, role: String, onParagraphReady: (Int) -> Unit = {}) {
-        val sel = OnDeviceVoices.selection(context, role) ?: return
+    /** Generates missing paragraphs, starting at [from] (where the reader is) and wrapping around. */
+    fun start(story: Story, sel: OnDeviceVoices.Selection, from: Int = 0, onParagraphReady: (Int) -> Unit = {}) {
         if (running) return
         cancel.set(false)
         running = true
         Thread {
             try {
-                generate(story, sel, onParagraphReady)
+                generate(story, sel, from, onParagraphReady)
             } catch (e: Throwable) {
                 status = "실패: ${e.message ?: e.javaClass.simpleName}"
             } finally {
@@ -72,7 +71,7 @@ class OnDeviceBook(private val context: Context) {
         }.start()
     }
 
-    private fun generate(story: Story, sel: OnDeviceVoices.Selection, onParagraphReady: (Int) -> Unit) {
+    private fun generate(story: Story, sel: OnDeviceVoices.Selection, from: Int, onParagraphReady: (Int) -> Unit) {
         val bundleDir = OnDeviceTts.bundleDir(context, sel.modelUrl)
         OnDeviceTts.download(sel.modelUrl, bundleDir) { name, p -> status = "모델 확인 중… $name (${(p * 100).toInt()}%)" }
         // The voice may have changed with the download, so pick the book folder only now.
@@ -88,7 +87,8 @@ class OnDeviceBook(private val context: Context) {
             var audioSec = 0f
             var workSec = 0f
             var made = 0
-            for (i in story.paragraphs.indices) {
+            val n = story.paragraphs.size
+            for (i in (0 until n).map { (it + from.coerceIn(0, n - 1)) % n }) {
                 if (cancel.get()) { status = "중지했어요. 다시 누르면 이어서 만들어요."; return }
                 val out = paragraphFile(d, i)
                 if (out.exists()) continue

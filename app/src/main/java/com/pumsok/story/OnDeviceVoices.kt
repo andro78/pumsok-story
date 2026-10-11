@@ -37,20 +37,13 @@ object OnDeviceVoices {
 
     fun serverBundleUrl(context: Context) = prefs(context).getString("ondevice_bundle_url", "") ?: ""
 
-    fun useLocal(context: Context) = prefs(context).getBoolean("ondevice_use_local_voice", false)
-
-    fun setUseLocal(context: Context, value: Boolean) =
-        prefs(context).edit().putBoolean("ondevice_use_local_voice", value).apply()
-
-    /** The voice to synthesize [role] with, or null when none is available yet. */
-    fun selection(context: Context, role: String): Selection? {
-        val serverUrl = serverBundleUrl(context)
-        val local = hasLocal(context, role)
-        return when {
-            local && (useLocal(context) || serverUrl.isBlank()) -> Selection(BASE_BUNDLE_URL, localDir(context, role))
-            serverUrl.isNotBlank() -> Selection(serverUrl, null)
-            else -> null
+    /** Reader voice keys: "local:MOTHER" / "local:FATHER" (built on the device), "server", "tts". */
+    fun selectionFor(context: Context, key: String): Selection? = when {
+        key.startsWith("local:") -> key.removePrefix("local:").let { role ->
+            if (hasLocal(context, role)) Selection(BASE_BUNDLE_URL, localDir(context, role)) else null
         }
+        key == "server" -> serverBundleUrl(context).ifBlank { null }?.let { Selection(it, null) }
+        else -> null
     }
 
     /**

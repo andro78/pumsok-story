@@ -68,7 +68,7 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : A
         encoder = env.createSession(File(dir, "t2s_encoder.onnx").path, opts)
         // A voice fine-tuned on the device carries LoRA adapters; they replace the decoders'
         // lora.* initializers (B ~ 0 in the bundle, i.e. no adapter).
-        val gptOpts = OnDeviceTrainer.readAdapters(voiceDir)?.let { adapters ->
+        val gptOpts = LoraAdapters.readAdapters(voiceDir)?.let { adapters ->
             OrtSession.SessionOptions().apply {
                 setIntraOpNumThreads(threads)
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)

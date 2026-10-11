@@ -5,7 +5,10 @@ import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,925 +23,360 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.json.JSONArray
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
 
-// Bump together with the server ENGINE_VERSION so locally cached story audio is regenerated.
-private const val NEURAL_ENGINE_VERSION = 3
+private val Brown = Color(0xFF795548)
+private val Green = Color(0xFF2E7D32)
+private val Purple = Color(0xFF6A1B9A)
 
 class MainActivity : ComponentActivity() {
+    enum class SpeakerRole(val label: String) { MOTHER("엄마"), FATHER("아빠") }
+    private class VoiceChoice(val key: String, val label: String)
+
     private val updater by lazy { Updater(this) }
     private val onDeviceBook by lazy { OnDeviceBook(this) }
-    // Bumped whenever an on-device voice is built or the voice choice changes, to refresh the cards.
-    private var voiceVersion by mutableIntStateOf(0)
-    private var useLocalVoice by mutableStateOf(false)
-    private var voiceBuilding by mutableStateOf(false)
-    private var voiceBuildProgress by mutableFloatStateOf(0f)
-    private var voiceBuildStatus by mutableStateOf("")
     private val executor = Executors.newSingleThreadExecutor()
+    private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("reader", MODE_PRIVATE) }
+    private val threads get() = prefs.getInt("ondevice_threads", 6)
+
+    private var tab by mutableIntStateOf(0)
+    private var message by mutableStateOf("")
+
+    // Story tab
     private var story by mutableStateOf<Story?>(null)
     private var index by mutableIntStateOf(0)
-    private var message by mutableStateOf("")
-    private var recording by mutableStateOf(false)
-    private var hasRecording by mutableStateOf(false)
-    private var consent by mutableStateOf(false)
-    private var transcript by mutableStateOf("")
     private var busy by mutableStateOf(false)
-    private var ttsReady by mutableStateOf(false)
+    private var readerVoice by mutableStateOf("tts")
+    private var reading by mutableStateOf(false)
+    private var readerStatus by mutableStateOf("")
+    private var samples by mutableStateOf<List<Pair<String, String>>>(emptyList())
+
+    // Voice tab
+    private val totalSteps = 8
+    private var role by mutableStateOf(SpeakerRole.MOTHER)
+    private var consent by mutableStateOf(false)
+    private var currentStep by mutableIntStateOf(0)
+    private var stepRecorded by mutableStateOf(List(8) { false })
+    private var recording by mutableStateOf(false)
+    private var voiceWorking by mutableStateOf(false)
+    private var voiceProgress by mutableFloatStateOf(0f)
+    private var voiceStatus by mutableStateOf("")
+    // Bumped when a voice is built or trained, so cards re-read what is on disk.
+    private var voiceVersion by mutableIntStateOf(0)
+
     private var recorder: MediaRecorder? = null
     private var player: MediaPlayer? = null
     private var tts: TextToSpeech? = null
-    private val voiceFile get() = File(filesDir, "parent.m4a")
+    private var ttsReady by mutableStateOf(false)
 
-    enum class SpeakerRole(val label: String) { MOTHER("엄마"), FATHER("아빠") }
-
-    private val voiceEngine = TrainedVoiceEngine()
-    private var motherProfile by mutableStateOf<VoiceProfile?>(null)
-    private var fatherProfile by mutableStateOf<VoiceProfile?>(null)
-    private val currentProfile: VoiceProfile
-        get() = if (speakerRole == SpeakerRole.MOTHER) {
-            motherProfile ?: VoiceProfile.defaultFor("MOTHER", "엄마")
-        } else {
-            fatherProfile ?: VoiceProfile.defaultFor("FATHER", "아빠")
-        }
-
-    private var isTraining by mutableStateOf(false)
-    private var trainingProgress by mutableFloatStateOf(0f)
-    private var trainingStepTitle by mutableStateOf("")
-    private var trainingStepDesc by mutableStateOf("")
-
-    private var showVoiceTuningDialog by mutableStateOf(false)
-    private var tuningPitchOffset by mutableFloatStateOf(0f)
-    private var tuningTau by mutableFloatStateOf(0.3f)
-    private var tuningWarmth by mutableFloatStateOf(2.0f)
-    private var tuningSpeed by mutableStateOf("-6%")
-    private var tuningElevenKey by mutableStateOf("")
-    private var tuningUseEleven by mutableStateOf(false)
-    private var isTuningPreviewLoading by mutableStateOf(false)
-
-    private val totalSteps = 8
-    private var speakerRole by mutableStateOf(SpeakerRole.MOTHER)
-    private var recordingStepMode by mutableStateOf(true)
-    private var currentStep by mutableIntStateOf(0)
-    private var stepRecorded by mutableStateOf(List(8) { false })
-
-    private fun getStepScript(step: Int, role: SpeakerRole): String = when (step) {
+    private fun stepScript(step: Int, r: SpeakerRole): String = when (step) {
         0 -> "우리 아가, 오늘 하루도 재미있고 씩씩하게 잘 보냈니?"
         1 -> "창밖으로 별들이 반짝이고, 달님이 은은하게 미소를 짓는 밤이야."
-        2 -> "${role.label}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 여행을 떠나보자."
+        2 -> "${r.label}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 여행을 떠나보자."
         3 -> "오늘 숲속에서는 어떤 신기하고 재미있는 일들이 일어났을까?"
         4 -> "와아! 알록달록 무지개 언덕에 달콤한 열매들이 가득 열렸네!"
         5 -> "쉿, 아기 곰이 새근새근 잠들었으니 발소리를 죽이고 조용히 걸어가자."
-        6 -> "아무 걱정하지 마렴, 언제나 ${role.label}가 네 곁에서 든든하게 지켜줄게."
+        6 -> "아무 걱정하지 마렴, 언제나 ${r.label}가 네 곁에서 든든하게 지켜줄게."
         7 -> "사랑하는 우리 아가, 오늘 밤도 예쁜 꿈 꾸렴. 편안하게 잘 자렴."
         else -> ""
     }
 
-    private fun getFullDefaultScript(role: SpeakerRole): String =
-        (0 until totalSteps).joinToString(" ") { getStepScript(it, role) }
-
-    private fun stepVoiceFile(step: Int) = File(filesDir, "voice_step_$step.m4a")
+    private fun stepFile(r: SpeakerRole, step: Int) = File(filesDir, "voice_${r.name}_$step.m4a")
+    private fun clips(r: SpeakerRole) = (0 until totalSteps).map { stepFile(r, it) to stepScript(it, r) }
 
     private val microphone = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        if (it && consent) startRecording() else message = "녹음하려면 마이크 권한과 동의가 필요합니다."
+        if (it && consent) startRecording() else message = "녹음하려면 마이크 권한과 동의가 필요해요."
     }
     private val importBook = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            busy = true
-            executor.execute {
-                val temp = File(filesDir, "import.tmp")
-                runCatching {
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        temp.outputStream().use { out ->
-                            val buffer = ByteArray(8192)
-                            var size = 0L
-                            while (true) {
-                                val n = input.read(buffer)
-                                if (n < 0) break
-                                size += n
-                                require(size <= 32 * 1024 * 1024) { "32MB 이하 EPUB을 선택해 주세요" }
-                                out.write(buffer, 0, n)
-                            }
+        if (uri == null) return@registerForActivityResult
+        busy = true
+        executor.execute {
+            val temp = File(filesDir, "import.tmp")
+            runCatching {
+                contentResolver.openInputStream(uri)?.use { input ->
+                    temp.outputStream().use { out ->
+                        val buffer = ByteArray(8192)
+                        var size = 0L
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            size += n
+                            require(size <= 32 * 1024 * 1024) { "32MB 이하 EPUB을 선택해 주세요" }
+                            out.write(buffer, 0, n)
                         }
-                    } ?: error("파일을 열 수 없습니다")
-                    val parsed = EpubReader.read(temp)
-                    check(temp.renameTo(File(filesDir, "book.epub"))) { "책을 저장하지 못했습니다" }
-                    parsed
-                }.onSuccess { parsed ->
-                    runOnUiThread {
-                        stopAllAudio()
-                        story = parsed
-                        index = 0
-                        prefs.edit().putInt("index", 0).apply()
-                        message = "‘${parsed.title}’ 동화를 가져왔습니다."
-                        busy = false
                     }
-                }.onFailure { e ->
-                    temp.delete()
-                    runOnUiThread { message = e.message ?: "가져오기 실패"; busy = false }
-                }
-            }
+                } ?: error("파일을 열 수 없어요")
+                val parsed = EpubReader.read(temp)
+                check(temp.renameTo(File(filesDir, "book.epub"))) { "책을 저장하지 못했어요" }
+                parsed
+            }.onSuccess { parsed -> runOnUiThread { openStory(parsed); busy = false } }
+                .onFailure { e -> temp.delete(); runOnUiThread { message = e.message ?: "가져오기 실패"; busy = false } }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         updater.checkOnLaunch()
-        val savedRole = prefs.getString("role", "MOTHER") ?: "MOTHER"
-        speakerRole = if (savedRole == "FATHER") SpeakerRole.FATHER else SpeakerRole.MOTHER
-        motherProfile = VoiceProfile.fromJson(prefs.getString("profile_MOTHER", null))
-        fatherProfile = VoiceProfile.fromJson(prefs.getString("profile_FATHER", null))
-        stepRecorded = (0 until totalSteps).map { stepVoiceFile(it).exists() }
-        useLocalVoice = OnDeviceVoices.useLocal(this)
-        hasRecording = voiceFile.exists()
-        transcript = prefs.getString("transcript", "") ?: ""
-        if (transcript.isBlank()) {
-            transcript = getFullDefaultScript(speakerRole)
-        }
+        role = if (prefs.getString("role", "MOTHER") == "FATHER") SpeakerRole.FATHER else SpeakerRole.MOTHER
+        migrateRecordings()
+        consent = prefs.getBoolean("consent", false)
+        stepRecorded = (0 until totalSteps).map { stepFile(role, it).exists() }
+        readerVoice = prefs.getString("reader_voice", null) ?: defaultReaderVoice()
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val result = tts?.setLanguage(Locale.KOREAN)
                 ttsReady = result != null && result >= TextToSpeech.LANG_AVAILABLE
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(id: String?) {}
+                    override fun onError(id: String?) { runOnUiThread { reading = false } }
+                    override fun onDone(id: String?) {
+                        val i = id?.removePrefix("p")?.toIntOrNull() ?: return
+                        runOnUiThread { if (reading) speakFrom(i + 1) }
+                    }
+                })
             }
         }
         executor.execute {
+            val found = (assets.list("")?.filter { it.endsWith(".epub") } ?: emptyList()).mapNotNull { name ->
+                runCatching {
+                    val f = File(cacheDir, name)
+                    assets.open(name).use { i -> f.outputStream().use { o -> i.copyTo(o) } }
+                    name to EpubReader.read(f).title
+                }.getOrNull()
+            }
+            runOnUiThread { samples = found }
             val saved = File(filesDir, "book.epub")
-            val parsed = runCatching {
-                if (!saved.exists() || saved.length() == 0L) {
-                    assets.open("sun_and_moon.epub").use { input ->
-                        saved.outputStream().use { out -> input.copyTo(out) }
-                    }
-                }
-                EpubReader.read(saved)
-            }.recoverCatching {
-                saved.delete()
-                assets.open("sun_and_moon.epub").use { input ->
-                    saved.outputStream().use { out -> input.copyTo(out) }
-                }
-                EpubReader.read(saved)
-            }.getOrNull()
-
-            if (parsed != null) {
-                runOnUiThread {
-                    story = parsed
-                    index = prefs.getInt("index", 0).coerceIn(parsed.paragraphs.indices)
-                }
+            val parsed = runCatching { EpubReader.read(saved) }.getOrNull()
+                ?: runCatching {
+                    assets.open("sun_and_moon.epub").use { i -> saved.outputStream().use { o -> i.copyTo(o) } }
+                    EpubReader.read(saved)
+                }.getOrNull()
+            if (parsed != null) runOnUiThread {
+                story = parsed
+                index = prefs.getInt("index", 0).coerceIn(parsed.paragraphs.indices)
             }
         }
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(
-                primary = Color(0xFF795548), background = Color(0xFFFFF8EF),
-                surface = Color(0xFFFFF8EF)
+                primary = Brown, background = Color(0xFFFFF8EF), surface = Color(0xFFFFF8EF)
             )) {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().padding(20.dp)) {
-                        if (maxWidth >= 700.dp) Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                            Column(Modifier.weight(0.4f).verticalScroll(rememberScrollState())) { Controls() }
-                            Column(Modifier.weight(0.6f).verticalScroll(rememberScrollState())) { Reader() }
-                        } else Column(Modifier.verticalScroll(rememberScrollState())) { Controls(); Reader() }
+                Scaffold(
+                    bottomBar = {
+                        NavigationBar {
+                            listOf("📖" to "동화", "🎙️" to "목소리", "⚙️" to "설정").forEachIndexed { i, (icon, label) ->
+                                NavigationBarItem(
+                                    selected = tab == i,
+                                    onClick = { tab = i },
+                                    icon = { Text(icon, fontSize = 20.sp) },
+                                    label = { Text(label) }
+                                )
+                            }
+                        }
                     }
-                    if (showVoiceTuningDialog) {
-                        VoiceTuningDialog()
+                ) { padding ->
+                    Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
+                        Column(
+                            Modifier.widthIn(max = 760.dp).fillMaxWidth().verticalScroll(rememberScrollState())
+                                .safeDrawingPadding().padding(horizontal = 20.dp, vertical = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            when (tab) {
+                                0 -> StoryTab()
+                                1 -> VoiceTab()
+                                else -> SettingsTab()
+                            }
+                            if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
             }
         }
     }
 
-    @Composable private fun Controls() {
-        Text("품속동화", style = MaterialTheme.typography.headlineLarge)
-        Text("엄마 아빠 목소리로 들려주는 동화", modifier = Modifier.padding(vertical = 8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { importBook.launch(arrayOf("application/epub+zip", "application/octet-stream")) }, enabled = !busy) {
-                Text(if (busy) "동화 불러오는 중…" else "내 EPUB 가져오기")
-            }
-            TextButton(onClick = { updater.checkOnLaunch(manual = true) }) {
-                Text("업데이트 확인")
-            }
+    /** Recordings used to be shared by both roles; keep them for the role that was selected. */
+    private fun migrateRecordings() {
+        (0 until totalSteps).forEach { step ->
+            val old = File(filesDir, "voice_step_$step.m4a")
+            if (old.exists() && !stepFile(role, step).exists()) old.renameTo(stepFile(role, step))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-            val isSun = story?.title?.contains("해와 달") == true
-            OutlinedButton(
-                onClick = { loadAssetStory("sun_and_moon.epub") },
-                colors = if (isSun) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
-                enabled = !busy
-            ) {
-                Text(if (isSun) "✓ 샘플: 해와 달" else "샘플: 해와 달")
-            }
-            val isTurtle = story?.title?.contains("거북이") == true
-            OutlinedButton(
-                onClick = { loadAssetStory("rabbit_and_turtle.epub") },
-                colors = if (isTurtle) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
-                enabled = !busy
-            ) {
-                Text(if (isTurtle) "✓ 샘플: 토끼와 거북이" else "샘플: 토끼와 거북이")
-            }
-        }
-        HorizontalDivider(Modifier.padding(vertical = 16.dp))
-        Text("부모님 목소리 등록", style = MaterialTheme.typography.titleLarge)
-        Text("아이에게 들려줄 목소리를 10초씩 편안하게 나누어 녹음해 보세요.")
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-            FilterChip(
-                selected = speakerRole == SpeakerRole.MOTHER,
-                onClick = {
-                    speakerRole = SpeakerRole.MOTHER
-                    prefs.edit().putString("role", "MOTHER").apply()
-                    if (transcript.isBlank() || transcript == getFullDefaultScript(SpeakerRole.FATHER)) {
-                        transcript = getFullDefaultScript(SpeakerRole.MOTHER)
-                    }
-                },
-                label = { Text("엄마 목소리") },
-                enabled = !recording
-            )
-            FilterChip(
-                selected = speakerRole == SpeakerRole.FATHER,
-                onClick = {
-                    speakerRole = SpeakerRole.FATHER
-                    prefs.edit().putString("role", "FATHER").apply()
-                    if (transcript.isBlank() || transcript == getFullDefaultScript(SpeakerRole.MOTHER)) {
-                        transcript = getFullDefaultScript(SpeakerRole.FATHER)
-                    }
-                },
-                label = { Text("아빠 목소리") },
-                enabled = !recording
-            )
-        }
-
-        Row(modifier = Modifier.padding(vertical = 4.dp)) {
-            Checkbox(consent, onCheckedChange = { consent = it }, enabled = !recording)
-            Text("내 목소리이거나, 녹음하는 부모님의 동의를 받았습니다.", Modifier.padding(top = 12.dp))
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-            FilterChip(
-                selected = recordingStepMode,
-                onClick = { recordingStepMode = true },
-                label = { Text("4단계 나누어 녹음 (추천 · 10초씩)") },
-                enabled = !recording
-            )
-            FilterChip(
-                selected = !recordingStepMode,
-                onClick = { recordingStepMode = false },
-                label = { Text("한 번에 녹음 (자유 대본)") },
-                enabled = !recording
-            )
-        }
-
-        if (recordingStepMode) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Row(
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            "${currentStep + 1}단계 / ${totalSteps}단계 (약 10초)",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        val isDone = stepRecorded.getOrElse(currentStep) { false }
-                        Text(
-                            if (isDone) "✓ 녹음 완료" else "대기 중",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (isDone) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    Text(
-                        text = "“${getStepScript(currentStep, speakerRole)}”",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(vertical = 12.dp)
-                    )
-
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
-                            (0..3).forEach { stepIndex ->
-                                val done = stepRecorded.getOrElse(stepIndex) { false }
-                                val isCurrent = stepIndex == currentStep
-                                OutlinedButton(
-                                    onClick = { if (!recording) currentStep = stepIndex },
-                                    colors = if (isCurrent) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
-                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                                    modifier = Modifier.weight(1f),
-                                    enabled = !recording
-                                ) {
-                                    Text("${stepIndex + 1}단계${if (done) "✓" else ""}", fontSize = 11.sp)
-                                }
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
-                            (4..7).forEach { stepIndex ->
-                                val done = stepRecorded.getOrElse(stepIndex) { false }
-                                val isCurrent = stepIndex == currentStep
-                                OutlinedButton(
-                                    onClick = { if (!recording) currentStep = stepIndex },
-                                    colors = if (isCurrent) ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFF673AB7).copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
-                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                                    modifier = Modifier.weight(1f),
-                                    enabled = !recording
-                                ) {
-                                    Text("${stepIndex + 1}단계${if (done) "✓" else ""}", fontSize = 11.sp)
-                                }
-                            }
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
-                                if (recording) finishRecording()
-                                else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
-                                else microphone.launch(Manifest.permission.RECORD_AUDIO)
-                            },
-                            enabled = consent,
-                            colors = if (recording) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors()
-                        ) {
-                            Text(if (recording) "녹음 종료" else if (stepRecorded.getOrElse(currentStep) { false }) "다시 녹음하기" else "이 문장 녹음 시작")
-                        }
-
-                        if (stepRecorded.getOrElse(currentStep) { false } && !recording) {
-                            OutlinedButton(onClick = { playFile(stepVoiceFile(currentStep)) }) {
-                                Text("들어보기")
-                            }
-                        }
-                    }
-
-                    Row(
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
-                    ) {
-                        TextButton(
-                            onClick = { currentStep = (currentStep - 1).coerceAtLeast(0) },
-                            enabled = currentStep > 0 && !recording
-                        ) {
-                            Text("← 이전 문장")
-                        }
-                        val recordedCount = stepRecorded.count { it }
-                        Text(
-                            "$recordedCount / $totalSteps 문장",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        TextButton(
-                            onClick = { currentStep = (currentStep + 1).coerceAtMost(totalSteps - 1) },
-                            enabled = currentStep < totalSteps - 1 && !recording
-                        ) {
-                            Text("다음 문장 →")
-                        }
-                    }
-                }
-            }
-
-            if (hasRecording) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-                    Button(onClick = { playFile(voiceFile) }, enabled = !recording) {
-                        Text("전체 목소리 듣기 (약 40초)")
-                    }
-                    TextButton(onClick = { resetAllRecordings() }, enabled = !recording) {
-                        Text("녹음 삭제")
-                    }
-                }
-            }
-        } else {
-            OutlinedTextField(
-                transcript,
-                onValueChange = {
-                    transcript = it
-                    prefs.edit().putString("transcript", it).apply()
-                },
-                label = { Text("녹음에서 읽을 대본") },
-                enabled = !recording,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Button(
-                onClick = {
-                    if (recording) finishRecording()
-                    else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
-                    else microphone.launch(Manifest.permission.RECORD_AUDIO)
-                },
-                enabled = recording || (consent && transcript.isNotBlank())
-            ) {
-                Text(if (recording) "녹음 종료" else "녹음 시작")
-            }
-            if (hasRecording) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-                    Button(onClick = { playFile(voiceFile) }, enabled = !recording) { Text("녹음 듣기") }
-                    TextButton(onClick = { resetAllRecordings() }, enabled = !recording) { Text("녹음 삭제") }
-                }
-            }
-        }
-
-        HorizontalDivider(Modifier.padding(vertical = 14.dp))
-        Text("AI 목소리 트레이닝 (학습)", style = MaterialTheme.typography.titleLarge)
-        Text("녹음된 목소리를 분석하여 ${speakerRole.label}의 고유한 톤과 템포로 동화를 읽을 수 있도록 모델을 만듭니다.", style = MaterialTheme.typography.bodySmall)
-
-        if (isTraining) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("🧠 ${speakerRole.label} 목소리 학습 진행 중…", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
-                    LinearProgressIndicator(
-                        progress = { trainingProgress },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                    )
-                    Text(trainingStepTitle, style = MaterialTheme.typography.labelLarge)
-                    Text(trainingStepDesc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        } else {
-            val recordedCount = stepRecorded.count { it }
-            val canTrain = hasRecording || recordedCount >= 4
-            val trainButtonText = when {
-                recordedCount == totalSteps && currentProfile.isTrained -> "🚀 8단계 정밀 OpenVoice AI 재학습 시작"
-                recordedCount == totalSteps -> "🚀 8단계 정밀 OpenVoice AI 학습 시작"
-                currentProfile.isTrained -> "🚀 ${recordedCount}단계 OpenVoice AI 재학습 시작"
-                recordedCount >= 4 -> "🚀 ${recordedCount}단계 OpenVoice AI 학습 시작"
-                else -> "🚀 최소 4문장 이상 녹음 후 AI 학습 가능 (현재 ${recordedCount}/$totalSteps)"
-            }
-
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (currentProfile.isTrained) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                ),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-            ) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (currentProfile.isTrained) {
-                        Text("✅ ${currentProfile.roleLabel} OpenVoice 뉴럴 AI 모델 준비 완료!", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
-                        Text("• 현재 적용된 음성: ${currentProfile.clipsCount}개 문장 반영 (약 ${currentProfile.sampleDurationSec.toInt()}초)", style = MaterialTheme.typography.bodySmall, color = Color(0xFF1B5E20))
-                    } else {
-                        Text("⚡ ${speakerRole.label} OpenVoice 딥러닝 보이스 클로닝", style = MaterialTheme.typography.titleMedium)
-                    }
-
-                    Text(
-                        when {
-                            recordedCount == totalSteps -> "🌟 8단계 전체 문장(약 1분 30초) 준비 완료! 아래 버튼을 누르면 8단계 전체 음색 벡터를 결합하여 가장 정교한 OpenVoice 모델을 생성합니다."
-                            recordedCount >= 4 -> "💡 현재 ${recordedCount}/8단계 녹음됨! 지금 바로 OpenVoice 학습이 가능하며, 나머지 문장도 추가 녹음하시면 음색이 더욱 닮아집니다."
-                            else -> "위의 1~8단계 중 최소 4단계 이상 문장을 녹음하시면 무료 OpenVoice 뉴럴 AI 학습을 시작할 수 있습니다. (현재 ${recordedCount}/$totalSteps 단계)"
-                        },
-                        style = MaterialTheme.typography.bodySmall
-                    )
-
-                    Button(
-                        onClick = { startVoiceTraining() },
-                        enabled = canTrain && !recording && !isTraining,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = if (canTrain) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary)
-                    ) {
-                        Text(trainButtonText, style = MaterialTheme.typography.labelLarge)
-                    }
-
-                    if (currentProfile.isTrained) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = { testTrainedVoice() },
-                                enabled = !recording && !isTraining,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("🎧 테스트 듣기")
-                            }
-                            Button(
-                                onClick = { openVoiceTuningDialog() },
-                                enabled = !recording && !isTraining,
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF673AB7)),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("🎛️ 음색 튜닝")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        OnDeviceVoiceCard()
-
-        OnDeviceBenchCard(enabled = !recording && !isTraining, playFile = { playFile(it) })
-
-        if (message.isNotBlank()) Text(message, Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.primary)
     }
 
-    @Composable private fun Reader() {
-        val book = story
-        HorizontalDivider(Modifier.padding(vertical = 16.dp))
-        if (book == null) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp).fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("📖 함께 읽을 동화를 골라주세요", style = MaterialTheme.typography.titleMedium)
-                    Text("아래 추천 동화를 누르면 바로 이야기를 시작할 수 있습니다.", modifier = Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-                        Button(onClick = { loadAssetStory("sun_and_moon.epub") }, enabled = !busy) {
-                            Text("해와 달이 된 오누이")
-                        }
-                        Button(onClick = { loadAssetStory("rabbit_and_turtle.epub") }, enabled = !busy) {
-                            Text("토끼와 거북이")
-                        }
-                    }
-                }
+    // ---------------------------------------------------------------- 📖 Story
+
+    private fun voiceChoices(): List<VoiceChoice> {
+        val list = mutableListOf<VoiceChoice>()
+        SpeakerRole.entries.forEach { r ->
+            if (OnDeviceVoices.hasLocal(this, r.name)) {
+                val kind = if (OnDeviceVoices.isTrained(this, r.name)) "기기 학습" else "빠르게 만든"
+                list += VoiceChoice("local:${r.name}", "${r.label} 목소리 ($kind)")
             }
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(book.title, style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.primary)
-                Text("${index + 1} / ${book.paragraphs.size} 문단", style = MaterialTheme.typography.labelMedium)
-            }
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
-                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
-            ) {
-                Text(
-                    book.paragraphs[index],
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.padding(16.dp),
-                    lineHeight = 28.sp
+        }
+        if (OnDeviceVoices.serverBundleUrl(this).isNotBlank()) list += VoiceChoice("server", "서버에서 학습한 목소리")
+        list += VoiceChoice("tts", "기기 기본 음성")
+        return list
+    }
+
+    private fun defaultReaderVoice() = voiceChoices().first().key
+
+    private fun chooseReaderVoice(key: String) {
+        stopReading()
+        readerVoice = key
+        prefs.edit().putString("reader_voice", key).apply()
+    }
+
+    @OptIn(ExperimentalLayoutApi::class)
+    @Composable private fun StoryTab() {
+        Text("품속동화", style = MaterialTheme.typography.headlineMedium)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            samples.forEach { (asset, title) ->
+                FilterChip(
+                    selected = story?.title == title,
+                    onClick = { loadAssetStory(asset) },
+                    label = { Text(title) },
+                    enabled = !busy
                 )
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                TextButton(onClick = { move(-1) }, enabled = index > 0) { Text("← 이전 문단") }
-                TextButton(onClick = { move(1) }, enabled = index < book.paragraphs.lastIndex) { Text("다음 문단 →") }
-            }
-
-            OnDeviceBookCard(book)
-
-            if (currentProfile.isTrained) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F8E9)),
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                ) {
-                    Column(Modifier.padding(14.dp)) {
-                        Text("❤️ ${currentProfile.roleLabel} 뉴럴 AI 목소리로 읽기", style = MaterialTheme.typography.titleMedium, color = Color(0xFF2E7D32))
-                        Text("${currentProfile.roleLabel}의 목소리 톤과 자연스러운 구연 억양을 입힌 뉴럴 AI 음성으로 동화를 읽어줍니다.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF33691E))
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(top = 8.dp)
-                        ) {
-                            Button(
-                                onClick = {
-                                    readParagraphWithNeuralVoice(book.paragraphs[index], currentProfile)
-                                },
-                                enabled = !recording && !isTraining
-                            ) {
-                                Text("❤️ ${currentProfile.roleLabel} AI 목소리로 읽기")
-                            }
-                            IconButton(onClick = { openVoiceTuningDialog() }) {
-                                Text("🎛️", fontSize = 18.sp)
-                            }
-                            if (hasRecording) {
-                                Button(
-                                    onClick = {
-                                        stopAllAudio()
-                                        playFile(voiceFile) {
-                                            readParagraphWithNeuralVoice(book.paragraphs[index], currentProfile)
-                                        }
-                                    },
-                                    enabled = !recording && !isTraining,
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF558B2F))
-                                ) {
-                                    Text("🌸 오프닝 + 본문 읽기")
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if (hasRecording) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text("🎙️ ${speakerRole.label} 녹음 오프닝", style = MaterialTheme.typography.titleSmall, color = Color(0xFFE65100))
-                        Text("녹음된 인사말을 듣거나, 왼쪽(위)에서 [AI 학습 시작]을 누르면 동화를 ${speakerRole.label} 목소리로 읽어줍니다.", style = MaterialTheme.typography.bodySmall)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
-                            Button(
-                                onClick = {
-                                    playFile(voiceFile) {
-                                        tts?.speak(book.paragraphs[index], TextToSpeech.QUEUE_FLUSH, null, "paragraph")
-                                    }
-                                },
-                                enabled = !recording
-                            ) {
-                                Text("🌸 오프닝 + 기본 낭독")
-                            }
-                            OutlinedButton(
-                                onClick = { playFile(voiceFile) },
-                                enabled = !recording
-                            ) {
-                                Text("오프닝만 듣기")
-                            }
-                        }
-                    }
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 4.dp)) {
-                FilledTonalButton(
-                    onClick = {
-                        stopAllAudio()
-                        tts?.setPitch(1.0f)
-                        tts?.setSpeechRate(1.0f)
-                        tts?.speak(book.paragraphs[index], TextToSpeech.QUEUE_FLUSH, null, "paragraph")
-                    },
-                    enabled = ttsReady && !recording && !isTraining
-                ) {
-                    Text("기본 기기 TTS로 듣기")
-                }
-                OutlinedButton(onClick = { stopAllAudio() }) {
-                    Text("소리 정지")
-                }
-            }
-
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)),
-                modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
-            ) {
-                Column(Modifier.padding(10.dp)) {
-                    Text("💡 동화 읽기 안내", style = MaterialTheme.typography.labelMedium)
-                    Text(
-                        if (currentProfile.isTrained)
-                            "• [❤️ ${currentProfile.roleLabel} 목소리로 읽기]: AI 학습을 통해 분석된 부모님의 고유 음향 모델(피치·템포)로 낭독합니다.\n• [🌸 오프닝 + 낭독]: 부모님의 실제 녹음된 다정한 인사말이 먼저 재생된 후 동화 본문이 이어집니다."
-                        else
-                            "• 부모님 목소리 녹음 후 [AI 학습 시작]을 완료하시면, ${speakerRole.label}의 맞춤형 목소리로 동화를 읽을 수 있습니다.\n• 본문 낭독은 안드로이드 기기의 한국어 TTS 엔진을 사용합니다.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
+            AssistChip(
+                onClick = { importBook.launch(arrayOf("application/epub+zip", "application/octet-stream")) },
+                label = { Text(if (busy) "불러오는 중…" else "+ 내 EPUB") },
+                enabled = !busy
+            )
         }
-    }
+        val book = story ?: return
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(book.title, style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
+            Text("${index + 1} / ${book.paragraphs.size}", style = MaterialTheme.typography.labelLarge)
+        }
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(book.paragraphs[index], style = MaterialTheme.typography.bodyLarge, lineHeight = 30.sp, modifier = Modifier.padding(18.dp))
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            TextButton(onClick = { move(-1) }, enabled = index > 0) { Text("← 이전") }
+            TextButton(onClick = { move(1) }, enabled = index < book.paragraphs.lastIndex) { Text("다음 →") }
+        }
 
-    @Composable private fun OnDeviceBookCard(book: Story) {
-        val ob = onDeviceBook
-        val role = speakerRole.name
-        val hasLocal = remember(voiceVersion, role) { OnDeviceVoices.hasLocal(this, role) }
-        val serverUrl = remember(voiceVersion, ob.running) { OnDeviceVoices.serverBundleUrl(this) }
-        val selection = remember(voiceVersion, role, useLocalVoice, serverUrl) { OnDeviceVoices.selection(this, role) }
-        LaunchedEffect(book, selection?.voiceDir, selection?.modelUrl, voiceVersion) { ob.attach(book, role) }
-        LaunchedEffect(ob.running) {
-            // Generating a whole book takes minutes; keep the screen (and the app) in the foreground.
-            if (ob.running) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val choices = remember(voiceVersion, tab) { voiceChoices() }
+        LaunchedEffect(choices) { if (choices.none { it.key == readerVoice }) chooseReaderVoice(choices.first().key) }
+        val selection = remember(readerVoice, voiceVersion) { OnDeviceVoices.selectionFor(this, readerVoice) }
+        LaunchedEffect(book, selection?.voiceDir, selection?.modelUrl, voiceVersion) { onDeviceBook.attach(book, selection) }
+        LaunchedEffect(onDeviceBook.running) {
+            // Generating takes minutes; keep the screen (and the app) in the foreground meanwhile.
+            if (onDeviceBook.running) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD)),
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-        ) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("📱 온디바이스로 책 전체 만들기", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1565C0))
-                Text(
-                    "‘${book.title}’ ${book.paragraphs.size}문단을 이 기기에서 목소리로 만들어 저장해요. 한 번 만들어 두면 인터넷 없이 들을 수 있어요. 만드는 동안은 화면을 켜 둘게요.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (hasLocal && serverUrl.isNotBlank()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(
-                            selected = !useLocalVoice,
-                            onClick = { useLocalVoice = false; OnDeviceVoices.setUseLocal(this@MainActivity, false) },
-                            label = { Text("☁️ 서버에서 학습한 목소리") },
-                            enabled = !ob.running
-                        )
-                        FilterChip(
-                            selected = useLocalVoice,
-                            onClick = { useLocalVoice = true; OnDeviceVoices.setUseLocal(this@MainActivity, true) },
-                            label = { Text("📱 기기에서 만든 목소리") },
-                            enabled = !ob.running
-                        )
+
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF1E0)), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("누구 목소리로 읽을까요?", style = MaterialTheme.typography.titleMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    choices.forEach { c ->
+                        FilterChip(selected = readerVoice == c.key, onClick = { chooseReaderVoice(c.key) }, label = { Text(c.label) })
                     }
-                } else if (selection != null) {
-                    Text(
-                        if (selection.voiceDir != null) "📱 기기에서 만든 ${speakerRole.label} 목소리로 읽어요." else "☁️ 서버에서 학습한 목소리로 읽어요.",
-                        style = MaterialTheme.typography.labelMedium
-                    )
                 }
-                if (selection == null) {
-                    Text("먼저 왼쪽(위)의 ‘📱 기기에서 목소리 만들기’로 ${speakerRole.label} 목소리를 만들거나, ‘🧪 온디바이스 엔진 테스트’에 모델 번들 주소를 넣어 주세요.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                if (choices.size == 1) {
+                    Text("‘🎙️ 목소리’ 탭에서 엄마·아빠 목소리를 만들면 여기서 고를 수 있어요.", style = MaterialTheme.typography.bodySmall)
                 }
-                LinearProgressIndicator(progress = { ob.progress }, modifier = Modifier.fillMaxWidth())
-                Text("${ob.readyCount}/${ob.total} 문단 준비됨", style = MaterialTheme.typography.labelMedium)
-                if (ob.status.isNotBlank()) Text(ob.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (ob.running) {
-                        OutlinedButton(onClick = { ob.stop() }) { Text("만들기 중지") }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (reading) {
+                        Button(onClick = { stopReading() }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
+                            Text("⏹ 멈추기")
+                        }
                     } else {
-                        Button(
-                            onClick = { ob.start(book, role) },
-                            enabled = selection != null && !recording && !isTraining,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
-                        ) {
-                            // When the book is complete this re-checks the voice bundle; a retrained voice regenerates it.
-                            Text(when {
-                                ob.readyCount == 0 -> "📱 책 전체 만들기"
-                                ob.readyCount < ob.total -> "📱 이어서 만들기"
-                                else -> "🔄 새 목소리 확인"
-                            })
-                        }
+                        Button(onClick = { startReading() }, enabled = readerVoice != "tts" || ttsReady) { Text("▶ 여기서부터 읽어주기") }
                     }
-                    Button(
-                        onClick = { playOnDeviceFrom(index) },
-                        enabled = ob.readyCount > 0 && ob.fileFor(index) != null && !recording
-                    ) {
-                        Text("▶ 여기서부터 듣기")
+                }
+                if (readerStatus.isNotBlank()) Text(readerStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                if (selection != null) {
+                    HorizontalDivider()
+                    val ob = onDeviceBook
+                    Text("책 전체 준비 ${ob.readyCount}/${ob.total} 문단 · 다 만들면 인터넷 없이 들을 수 있어요", style = MaterialTheme.typography.labelMedium)
+                    LinearProgressIndicator(progress = { ob.progress }, modifier = Modifier.fillMaxWidth())
+                    if (ob.status.isNotBlank()) Text(ob.status, style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (ob.running) OutlinedButton(onClick = { ob.stop() }) { Text("미리 만들기 중지") }
+                        else if (ob.readyCount < ob.total) OutlinedButton(onClick = { ob.start(book, selection, index) }) { Text("책 전체 미리 만들기") }
                     }
                 }
             }
         }
     }
 
-    @Composable private fun OnDeviceVoiceCard() {
-        val role = speakerRole.name
-        val hasLocal = remember(voiceVersion, role) { OnDeviceVoices.hasLocal(this, role) }
-        val recordedCount = stepRecorded.count { it }
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD)),
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-        ) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("📱 기기에서 목소리 만들기 (빠름 · 학습 없음)", style = MaterialTheme.typography.titleMedium, color = Color(0xFF1565C0))
-                Text(
-                    "녹음한 단계 문장 하나로 이 기기에서 바로 ${speakerRole.label} 목소리를 만들어요. 서버로 녹음을 보내지 않아요. 처음 한 번 기본 모델(약 600MB)을 내려받으니 Wi-Fi에서 해 주세요. 서버에서 학습한 목소리보다는 덜 닮을 수 있어요.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                val trained = remember(voiceVersion, role) { OnDeviceVoices.isTrained(this@MainActivity, role) }
-                if (hasLocal) Text(
-                    if (trained) "✅ 기기에서 학습까지 마친 ${speakerRole.label} 목소리가 있어요." else "✅ 기기에서 만든 ${speakerRole.label} 목소리가 있어요 (학습 전).",
-                    style = MaterialTheme.typography.labelMedium, color = Color(0xFF2E7D32)
-                )
-                if (voiceBuilding) LinearProgressIndicator(progress = { voiceBuildProgress }, modifier = Modifier.fillMaxWidth())
-                if (voiceBuildStatus.isNotBlank()) Text(voiceBuildStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { buildOnDeviceVoice() },
-                        enabled = consent && recordedCount > 0 && !voiceBuilding && !recording && !isTraining,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1565C0))
-                    ) {
-                        Text(if (hasLocal) "📱 다시 만들기" else "📱 목소리 만들기")
-                    }
-                    if (hasLocal) {
-                        OutlinedButton(onClick = { previewOnDeviceVoice() }, enabled = !voiceBuilding && !recording) {
-                            Text("🎧 들어보기")
-                        }
-                    }
-                }
-                if (hasLocal) {
-                    Button(
-                        onClick = { trainOnDeviceVoice() },
-                        enabled = consent && recordedCount >= 4 && !voiceBuilding && !recording && !isTraining,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6A1B9A))
-                    ) {
-                        Text(if (trained) "🧠 기기에서 다시 학습하기 (실험)" else "🧠 기기에서 학습해 더 닮게 (실험)")
-                    }
-                    Text(
-                        "녹음한 문장 ${recordedCount}개로 이 기기에서 말투를 학습해요(${OnDeviceVoices.TRAIN_EPOCHS}회 반복). 몇 분에서 수십 분 걸리고 기기가 따뜻해질 수 있어요. 충전기를 꽂고 화면을 켜 둔 채로 해 주세요.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                if (recordedCount == 0) Text("위에서 단계별 문장을 하나 이상 녹음해 주세요.", style = MaterialTheme.typography.bodySmall)
-                else if (!consent) Text("목소리 사용 동의에 체크해 주세요.", style = MaterialTheme.typography.bodySmall)
-            }
-        }
+    private fun startReading() {
+        if (story == null) return
+        stopAllAudio()
+        reading = true
+        readerStatus = ""
+        if (readerVoice == "tts") speakFrom(index) else playGeneratedFrom(index, startedGeneration = false)
     }
 
-    private fun buildOnDeviceVoice() {
-        val role = speakerRole
-        val clips = (0 until totalSteps).map { stepVoiceFile(it) to getStepScript(it, role) }
-        voiceBuilding = true
-        voiceBuildProgress = 0f
-        voiceBuildStatus = "준비 중…"
-        Thread {
-            try {
-                val info = OnDeviceVoices.build(this, role.name, clips, prefs.getInt("ondevice_threads", 6)) { s, p ->
-                    runOnUiThread { voiceBuildStatus = s; voiceBuildProgress = p }
-                }
-                runOnUiThread {
-                    voiceBuildStatus = "${role.label} 목소리를 만들었어요 (녹음 %.1f초 사용, %.1f초 걸림). ‘들어보기’로 확인해 보세요.".format(info.seconds, info.millis / 1000f)
-                    useLocalVoice = true
-                    OnDeviceVoices.setUseLocal(this, true)
-                    voiceVersion++
-                }
-            } catch (e: Throwable) {
-                runOnUiThread { voiceBuildStatus = "실패: ${e.message ?: e.javaClass.simpleName}" }
-            } finally {
-                runOnUiThread { voiceBuilding = false }
-            }
-        }.start()
+    private fun stopReading() {
+        reading = false
+        readerStatus = ""
+        handler.removeCallbacksAndMessages(null)
+        stopAllAudio()
     }
 
-    private fun trainOnDeviceVoice() {
-        val role = speakerRole
-        val clips = (0 until totalSteps).map { stepVoiceFile(it) to getStepScript(it, role) }
-        voiceBuilding = true
-        voiceBuildProgress = 0f
-        voiceBuildStatus = "학습 준비 중…"
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        Thread {
-            try {
-                val info = OnDeviceVoices.train(this, role.name, clips, prefs.getInt("ondevice_threads", 6)) { s, p ->
-                    runOnUiThread { voiceBuildStatus = s; voiceBuildProgress = p }
-                }
-                val minutes = info.millis / 60000f
-                runOnUiThread {
-                    voiceBuildStatus = "학습 완료: ${info.steps}단계, %.1f분 (손실 %.2f → %.2f). ‘들어보기’로 확인해 보세요.".format(minutes, info.firstLoss, info.lastLoss)
-                    voiceVersion++
-                }
-                reportTraining(role.name, info)
-            } catch (e: Throwable) {
-                runOnUiThread { voiceBuildStatus = "학습 실패: ${e.message ?: e.javaClass.simpleName}" }
-            } finally {
-                runOnUiThread {
-                    voiceBuilding = false
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
-            }
-        }.start()
-    }
-
-    /** Sends training speed (no audio, no voice data) to the bench log, like the engine test does. */
-    private fun reportTraining(role: String, info: OnDeviceTrainer.Info) {
-        runCatching {
-            val body = org.json.JSONObject()
-                .put("kind", "train")
-                .put("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
-                .put("soc", if (android.os.Build.VERSION.SDK_INT >= 31) "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}" else android.os.Build.HARDWARE)
-                .put("app_version", packageManager.getPackageInfo(packageName, 0).versionName)
-                .put("threads", prefs.getInt("ondevice_threads", 6))
-                .put("steps", info.steps).put("train_ms", info.millis)
-                .put("first_loss", info.firstLoss.toDouble()).put("last_loss", info.lastLoss.toDouble())
-            val conn = java.net.URL("https://d32.org/api/voice/bench").openConnection() as java.net.HttpURLConnection
-            conn.requestMethod = "POST"; conn.doOutput = true; conn.connectTimeout = 10000
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.outputStream.use { it.write(body.toString().toByteArray()) }
-            conn.responseCode; conn.disconnect()
-        }
-    }
-
-    /** Synthesizes one sample sentence with the voice built on this device and plays it. */
-    private fun previewOnDeviceVoice() {
-        val role = speakerRole
-        voiceBuilding = true
-        voiceBuildStatus = "샘플 문장을 만드는 중…"
-        Thread {
-            try {
-                val baseDir = OnDeviceTts.bundleDir(this, OnDeviceVoices.BASE_BUNDLE_URL)
-                val sample = org.json.JSONArray(File(baseDir, "bench.json").readText()).getJSONObject(0)
-                val phones = sample.getJSONArray("phones").let { a -> LongArray(a.length()) { a.getLong(it) } }
-                val wav = File(cacheDir, "ondevice_voice_preview.wav")
-                OnDeviceTts(baseDir, prefs.getInt("ondevice_threads", 6), OnDeviceVoices.localDir(this, role.name)).use { tts ->
-                    OnDeviceTts.writeWav(wav, tts.synthesize(phones).audio, tts.sampleRate)
-                }
-                runOnUiThread {
-                    voiceBuildStatus = "“${sample.getString("text")}”"
-                    playFile(wav)
-                }
-            } catch (e: Throwable) {
-                runOnUiThread { voiceBuildStatus = "실패: ${e.message ?: e.javaClass.simpleName}" }
-            } finally {
-                runOnUiThread { voiceBuilding = false }
-            }
-        }.start()
-    }
-
-    /** Plays generated paragraphs from [start], turning pages as it goes, until one is missing. */
-    private fun playOnDeviceFrom(start: Int) {
+    private fun speakFrom(i: Int) {
         val book = story ?: return
-        val file = onDeviceBook.fileFor(start) ?: run { message = "아직 만들지 않은 문단이에요."; return }
-        if (index != start) {
-            index = start
-            prefs.edit().putInt("index", index).apply()
+        if (i > book.paragraphs.lastIndex) { reading = false; return }
+        showParagraph(i)
+        tts?.speak(book.paragraphs[i], TextToSpeech.QUEUE_FLUSH, null, "p$i")
+    }
+
+    /** Plays generated paragraphs from [i] on, generating ahead in the background when needed. */
+    private fun playGeneratedFrom(i: Int, startedGeneration: Boolean) {
+        val book = story ?: return
+        if (!reading) return
+        if (i > book.paragraphs.lastIndex) { reading = false; readerStatus = "끝까지 읽었어요."; return }
+        showParagraph(i)
+        val file = onDeviceBook.fileFor(i)
+        when {
+            file != null -> {
+                readerStatus = ""
+                playFile(file) { playGeneratedFrom(i + 1, startedGeneration) }
+            }
+            onDeviceBook.running -> {
+                readerStatus = "이 문단을 목소리로 만드는 중…"
+                handler.postDelayed({ playGeneratedFrom(i, startedGeneration) }, 500)
+            }
+            !startedGeneration -> {
+                val sel = OnDeviceVoices.selectionFor(this, readerVoice) ?: run { reading = false; return }
+                readerStatus = "목소리를 준비하는 중…"
+                onDeviceBook.start(book, sel, i)
+                handler.postDelayed({ playGeneratedFrom(i, true) }, 500)
+            }
+            else -> {
+                reading = false
+                readerStatus = onDeviceBook.status.ifBlank { "목소리를 만들지 못했어요." }
+            }
         }
-        playFile(file) {
-            val next = start + 1
-            if (next <= book.paragraphs.lastIndex && onDeviceBook.fileFor(next) != null) playOnDeviceFrom(next)
+    }
+
+    private fun showParagraph(i: Int) {
+        if (index != i) {
+            index = i
+            prefs.edit().putInt("index", i).apply()
         }
     }
 
     private fun move(delta: Int) {
-        stopAllAudio()
-        index = (index + delta).coerceIn(0, (story?.paragraphs?.lastIndex ?: 0))
-        prefs.edit().putInt("index", index).apply()
+        stopReading()
+        showParagraph((index + delta).coerceIn(0, story?.paragraphs?.lastIndex ?: 0))
+    }
+
+    private fun openStory(parsed: Story) {
+        stopReading()
+        story = parsed
+        index = 0
+        prefs.edit().putInt("index", 0).apply()
+        message = ""
     }
 
     private fun loadAssetStory(assetName: String) {
@@ -946,32 +384,124 @@ class MainActivity : ComponentActivity() {
         executor.execute {
             val book = File(filesDir, "book.epub")
             runCatching {
-                assets.open(assetName).use { input ->
-                    book.outputStream().use { out -> input.copyTo(out) }
-                }
+                assets.open(assetName).use { i -> book.outputStream().use { o -> i.copyTo(o) } }
                 EpubReader.read(book)
-            }.onSuccess { parsed ->
-                runOnUiThread {
-                    stopAllAudio()
-                    story = parsed
-                    index = 0
-                    prefs.edit().putInt("index", 0).apply()
-                    message = "‘${parsed.title}’ 동화를 불러왔습니다."
-                    busy = false
+            }.onSuccess { parsed -> runOnUiThread { openStory(parsed); busy = false } }
+                .onFailure { e -> runOnUiThread { message = e.message ?: "동화 불러오기 실패"; busy = false } }
+        }
+    }
+
+    // ---------------------------------------------------------------- 🎙️ Voice
+
+    @Composable private fun VoiceTab() {
+        Text("목소리 만들기", style = MaterialTheme.typography.headlineMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SpeakerRole.entries.forEach { r ->
+                FilterChip(
+                    selected = role == r,
+                    onClick = {
+                        role = r
+                        prefs.edit().putString("role", r.name).apply()
+                        stepRecorded = (0 until totalSteps).map { stepFile(r, it).exists() }
+                        currentStep = stepRecorded.indexOfFirst { !it }.coerceAtLeast(0)
+                        voiceStatus = ""
+                    },
+                    label = { Text("${r.label} 목소리") },
+                    enabled = !recording && !voiceWorking
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(consent, onCheckedChange = { consent = it; prefs.edit().putBoolean("consent", it).apply() }, enabled = !recording)
+            Text("내 목소리이거나, 녹음하는 분의 동의를 받았어요.", style = MaterialTheme.typography.bodyMedium)
+        }
+
+        val recordedCount = stepRecorded.count { it }
+        val hasVoice = remember(voiceVersion, role) { OnDeviceVoices.hasLocal(this, role.name) }
+        val trained = remember(voiceVersion, role) { OnDeviceVoices.isTrained(this, role.name) }
+
+        StepCard("①", "대본 녹음", done = recordedCount == totalSteps, summary = "$recordedCount / $totalSteps 문장") { RecordingPanel() }
+        StepCard("②", "목소리 만들기", done = hasVoice, summary = if (hasVoice) "완료" else "녹음 1문장부터 가능") {
+            Text("녹음한 문장 하나로 이 기기에서 바로 ${role.label} 목소리를 만들어요. 녹음은 기기 밖으로 나가지 않아요. 처음 한 번 기본 모델(약 750MB)을 내려받으니 Wi-Fi에서 해 주세요.", style = MaterialTheme.typography.bodySmall)
+            Button(onClick = { buildVoice() }, enabled = consent && recordedCount > 0 && !voiceWorking && !recording) {
+                Text(if (hasVoice) "다시 만들기" else "목소리 만들기")
+            }
+        }
+        StepCard("③", "더 닮게 학습 (실험)", done = trained, summary = if (trained) "완료" else "녹음 4문장 이상") {
+            Text("녹음한 문장으로 이 기기에서 말투를 학습해요. 1~3분쯤 걸리고 기기가 따뜻해질 수 있어요. 충전기를 꽂고 화면을 켜 둔 채로 해 주세요.", style = MaterialTheme.typography.bodySmall)
+            Button(
+                onClick = { trainVoice() },
+                enabled = consent && hasVoice && recordedCount >= 4 && !voiceWorking && !recording,
+                colors = ButtonDefaults.buttonColors(containerColor = Purple)
+            ) { Text(if (trained) "다시 학습하기" else "학습하기") }
+            if (!hasVoice) Text("먼저 ②를 해 주세요.", style = MaterialTheme.typography.bodySmall)
+        }
+
+        if (voiceWorking) LinearProgressIndicator(progress = { voiceProgress }, modifier = Modifier.fillMaxWidth())
+        if (voiceStatus.isNotBlank()) Text(voiceStatus, color = MaterialTheme.colorScheme.primary)
+        Button(
+            onClick = { previewVoice() },
+            enabled = hasVoice && !voiceWorking && !recording,
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Green)
+        ) { Text("🎧 ${role.label} 목소리 들어보기", fontSize = 16.sp) }
+    }
+
+    @Composable private fun StepCard(number: String, title: String, done: Boolean, summary: String, content: @Composable ColumnScope.() -> Unit) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = if (done) Color(0xFFEFF7EE) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("$number $title", style = MaterialTheme.typography.titleMedium)
+                    Text(if (done) "✓ $summary" else summary, style = MaterialTheme.typography.labelLarge, color = if (done) Green else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            }.onFailure { e ->
-                runOnUiThread {
-                    message = e.message ?: "동화 불러오기 실패"
-                    busy = false
+                content()
+            }
+        }
+    }
+
+    @Composable private fun RecordingPanel() {
+        Text("“${stepScript(currentStep, role)}”", style = MaterialTheme.typography.titleMedium)
+        listOf(0..3, 4..7).forEach { range ->
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                range.forEach { step ->
+                    val done = stepRecorded[step]
+                    OutlinedButton(
+                        onClick = { currentStep = step },
+                        enabled = !recording,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        colors = if (step == currentStep) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) else ButtonDefaults.outlinedButtonColors(),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("${step + 1}${if (done) " ✓" else ""}", fontSize = 13.sp) }
                 }
             }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    if (recording) finishRecording()
+                    else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
+                    else microphone.launch(Manifest.permission.RECORD_AUDIO)
+                },
+                enabled = consent && !voiceWorking,
+                colors = if (recording) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors()
+            ) { Text(if (recording) "⏹ 녹음 끝내기" else if (stepRecorded[currentStep]) "🎙️ 다시 녹음" else "🎙️ 녹음 시작") }
+            if (stepRecorded[currentStep] && !recording) {
+                OutlinedButton(onClick = { playFile(stepFile(role, currentStep)) }) { Text("들어보기") }
+            }
+        }
+        if (!consent) Text("녹음하려면 위의 동의에 체크해 주세요.", style = MaterialTheme.typography.bodySmall)
+        if (stepRecorded.any { it }) {
+            TextButton(onClick = { deleteRecordings() }, enabled = !recording && !voiceWorking) { Text("${role.label} 녹음 모두 지우기") }
         }
     }
 
     @Suppress("DEPRECATION")
     private fun startRecording() {
-        stopAllAudio()
-        val targetTmp = File(filesDir, "voice.tmp")
+        stopReading()
+        val tmp = File(filesDir, "voice.tmp")
         val next = MediaRecorder()
         runCatching {
             next.setAudioSource(MediaRecorder.AudioSource.MIC)
@@ -979,15 +509,15 @@ class MainActivity : ComponentActivity() {
             next.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             next.setAudioSamplingRate(24000)
             next.setAudioEncodingBitRate(96000)
-            next.setOutputFile(targetTmp.absolutePath)
+            next.setOutputFile(tmp.absolutePath)
             next.prepare(); next.start()
         }.onSuccess {
             recorder = next
             recording = true
-            message = if (recordingStepMode) "${currentStep + 1}단계 녹음 중입니다…" else "녹음 중입니다…"
+            voiceStatus = "${currentStep + 1}번 문장을 읽어 주세요. 다 읽으면 ‘녹음 끝내기’를 눌러요."
         }.onFailure {
-            next.release(); targetTmp.delete()
-            message = "녹음을 시작하지 못했습니다."
+            next.release(); tmp.delete()
+            voiceStatus = "녹음을 시작하지 못했어요."
         }
     }
 
@@ -996,382 +526,134 @@ class MainActivity : ComponentActivity() {
         val pending = File(filesDir, "voice.tmp")
         runCatching {
             active.stop()
-            if (recordingStepMode) {
-                val target = stepVoiceFile(currentStep)
-                if (target.exists()) target.delete()
-                check(pending.renameTo(target))
-                val updated = stepRecorded.toMutableList()
-                updated[currentStep] = true
-                stepRecorded = updated
-
-                val recordedClips = (0 until totalSteps).map { stepVoiceFile(it) }.filter { it.exists() && it.length() > 0 }
-                if (recordedClips.isNotEmpty()) {
-                    AudioConcatenator.concatM4a(recordedClips, voiceFile)
-                    hasRecording = voiceFile.exists() && voiceFile.length() > 1000
-                }
-                val countDone = updated.count { it }
-                if (countDone == totalSteps) {
-                    transcript = getFullDefaultScript(speakerRole)
-                    prefs.edit().putString("transcript", transcript).apply()
-                    message = "🎉 8단계 전체 문장(약 1분 30초) 녹음 완료! [AI 학습 시작]을 눌러 최고 정밀도로 학습해보세요."
-                } else if (countDone >= 4) {
-                    message = "✅ ${currentStep + 1}단계 저장 완료! (${countDone}/$totalSteps 단계 완료 - 지금 학습하거나 더 녹음 가능)"
-                    val nextStep = (currentStep + 1).coerceAtMost(totalSteps - 1)
-                    if (!stepRecorded[nextStep]) currentStep = nextStep
-                } else {
-                    message = "✅ ${currentStep + 1}단계 문장이 저장되었습니다. (${countDone}/$totalSteps 단계)"
-                    val nextStep = (currentStep + 1).coerceAtMost(totalSteps - 1)
-                    if (!stepRecorded[nextStep]) currentStep = nextStep
-                }
-            } else {
-                if (voiceFile.exists()) voiceFile.delete()
-                check(pending.renameTo(voiceFile))
-                hasRecording = true
-                message = "🎉 녹음이 완료되었습니다! 동화를 골라 [🌸 오프닝 + 본문 듣기]를 눌러보세요."
-            }
+            val target = stepFile(role, currentStep)
+            target.delete()
+            check(pending.renameTo(target))
+            stepRecorded = stepRecorded.toMutableList().also { it[currentStep] = true }
+            val done = stepRecorded.count { it }
+            voiceStatus = "${currentStep + 1}번 문장을 저장했어요 ($done/$totalSteps)."
+            stepRecorded.indexOfFirst { !it }.takeIf { it >= 0 }?.let { currentStep = it }
         }.onFailure {
             pending.delete()
-            message = "녹음이 너무 짧거나 저장에 실패했습니다."
+            voiceStatus = "녹음이 너무 짧거나 저장하지 못했어요."
         }
         active.release(); recorder = null; recording = false
     }
 
-    private fun stopAllAudio() {
-        tts?.let { voiceEngine.stop(it) }
-        player?.release()
-        player = null
+    private fun deleteRecordings() {
+        stopAllAudio()
+        (0 until totalSteps).forEach { stepFile(role, it).delete() }
+        stepRecorded = List(totalSteps) { false }
+        currentStep = 0
+        voiceStatus = "${role.label} 녹음을 지웠어요. 만든 목소리는 그대로 있어요."
     }
 
-    private fun startVoiceTraining() {
-        if (isTraining || recording) return
-        stopAllAudio()
-        val clips = (0 until totalSteps).map { stepVoiceFile(it) }.filter { it.exists() && it.length() > 0 }
-        val filesToUse = if (clips.isNotEmpty()) clips else listOf(voiceFile).filter { it.exists() && it.length() > 0 }
-        if (filesToUse.isEmpty()) {
-            message = "학습을 시작하려면 먼저 부모님 목소리를 최소 4문장 이상 녹음해 주세요."
-            return
-        }
-        isTraining = true
-        trainingProgress = 0.05f
-        trainingStepTitle = "학습 준비 중…"
-        trainingStepDesc = "녹음 파일을 불러오고 있습니다."
-
-        executor.execute {
-            runCatching {
-                if ((!voiceFile.exists() || voiceFile.length() < 1000) && clips.isNotEmpty()) {
-                    AudioConcatenator.concatM4a(clips, voiceFile)
-                }
-                val fileToUpload = if (voiceFile.exists() && voiceFile.length() > 1000) voiceFile else filesToUse.first()
-                val isOnline = NeuralVoiceClient.checkHealth()
-
-                if (isOnline) {
-                    val trained = NeuralVoiceClient.trainOnServer(
-                        roleKey = speakerRole.name,
-                        roleLabel = speakerRole.label,
-                        audioFile = fileToUpload
-                    ) { step, title ->
-                        runOnUiThread {
-                            trainingProgress = step / 4.0f
-                            trainingStepTitle = title
-                            trainingStepDesc = when (step) {
-                                1 -> "부모님의 실제 음성(${clips.size}개 문장)을 d32.org OpenVoice 뉴럴 서버로 전송합니다."
-                                2 -> "음성 잡음을 제거하고 기본 주파수(F0) 및 억양 곡선을 정밀 분석합니다."
-                                3 -> "부모님 성도 특성과 256차원 OpenVoice 딥러닝 음색 벡터를 다중 구간 합성합니다."
-                                4 -> "OpenVoice 딥러닝 보이스 클로닝 모델 생성이 완료되었습니다!"
-                                else -> ""
-                            }
-                        }
-                    }
-                    val previewFile = File(cacheDir, "preview_${speakerRole.name.lowercase()}.mp3")
-                    NeuralVoiceClient.downloadPreview("speaker_${speakerRole.name.lowercase()}", previewFile)
-                    Pair(trained, true)
-                } else {
-                    val trained = VoiceTrainer.train(
-                        roleKey = speakerRole.name,
-                        roleLabel = speakerRole.label,
-                        audioFiles = filesToUse
-                    ) { state ->
-                        runOnUiThread {
-                            trainingProgress = state.progress
-                            trainingStepTitle = state.title
-                            trainingStepDesc = state.description
-                        }
-                    }
-                    Pair(trained, false)
-                }
-            }.onSuccess { (trained, isOnline) ->
-                runOnUiThread {
-                    isTraining = false
-                    if (speakerRole == SpeakerRole.MOTHER) {
-                        motherProfile = trained
-                        prefs.edit().putString("profile_MOTHER", trained.toJson()).apply()
-                    } else {
-                        fatherProfile = trained
-                        prefs.edit().putString("profile_FATHER", trained.toJson()).apply()
-                    }
-                    message = if (isOnline) {
-                        "🎉 ${trained.roleLabel} 뉴럴 AI 보이스 클로닝 완료! [🎧 학습 목소리 테스트]를 들어보세요."
-                    } else {
-                        "🎉 ${trained.roleLabel} 목소리 학습 완료! [🎧 학습 목소리 테스트] 또는 동화 읽기를 시작해보세요."
-                    }
-                }
-            }.onFailure { err ->
-                runOnUiThread {
-                    isTraining = false
-                    message = "학습 실패: ${err.message}"
-                }
+    private fun runVoiceJob(start: String, job: ((String, Float) -> Unit) -> String) {
+        stopReading()
+        voiceWorking = true
+        voiceProgress = 0f
+        voiceStatus = start
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Thread {
+            val result = runCatching { job { s, p -> runOnUiThread { voiceStatus = s; voiceProgress = p } } }
+            runOnUiThread {
+                voiceStatus = result.getOrElse { "실패: ${it.message ?: it.javaClass.simpleName}" }
+                voiceWorking = false
+                voiceVersion++
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
+        }.start()
+    }
+
+    private fun buildVoice() {
+        val r = role
+        runVoiceJob("준비 중…") { onStatus ->
+            val info = OnDeviceVoices.build(this, r.name, clips(r), threads, onStatus)
+            runOnUiThread { chooseReaderVoice("local:${r.name}") }
+            "${r.label} 목소리를 만들었어요 (녹음 %.1f초 사용). 아래 ‘들어보기’로 확인해 보세요.".format(info.seconds)
         }
     }
 
-    private fun testTrainedVoice() {
-        stopAllAudio()
-        val profile = currentProfile
-        val phrase = "사랑하는 우리 아이야, ${profile.roleLabel}가 들려주는 신비롭고 따뜻한 동화 나라로 함께 가보자."
-        val previewFile = File(cacheDir, "preview_${profile.roleKey.lowercase()}.mp3")
+    private fun trainVoice() {
+        val r = role
+        runVoiceJob("학습 준비 중…") { onStatus ->
+            val info = OnDeviceVoices.train(this, r.name, clips(r), threads, onStatus)
+            reportTraining(info)
+            runOnUiThread { chooseReaderVoice("local:${r.name}") }
+            "학습을 마쳤어요 (%.1f분). 아래 ‘들어보기’로 확인해 보세요.".format(info.millis / 60000f)
+        }
+    }
 
-        message = "✨ ${profile.roleLabel} 뉴럴 AI 목소리로 테스트 음성을 준비 중입니다…"
-        executor.execute {
-            var ok = NeuralVoiceClient.downloadPreview("speaker_${profile.roleKey.lowercase()}", previewFile)
-            if (!ok || !previewFile.exists()) {
-                ok = NeuralVoiceClient.synthesizeSpeech(phrase, profile, previewFile)
+    /** Synthesizes a sample sentence with [role]'s on-device voice (including trained adapters) and plays it. */
+    private fun previewVoice() {
+        val r = role
+        stopReading()
+        voiceWorking = true
+        voiceProgress = 0.5f
+        voiceStatus = "샘플 문장을 만드는 중…"
+        Thread {
+            val result = runCatching {
+                val baseDir = OnDeviceTts.bundleDir(this, OnDeviceVoices.BASE_BUNDLE_URL)
+                val sample = JSONArray(File(baseDir, "bench.json").readText()).getJSONObject(0)
+                val phones = sample.getJSONArray("phones").let { a -> LongArray(a.length()) { a.getLong(it) } }
+                val wav = File(cacheDir, "voice_preview.wav")
+                OnDeviceTts(baseDir, threads, OnDeviceVoices.localDir(this, r.name)).use { t ->
+                    OnDeviceTts.writeWav(wav, t.synthesize(phones).audio, t.sampleRate)
+                }
+                sample.getString("text") to wav
             }
             runOnUiThread {
-                if (ok && previewFile.exists()) {
-                    message = "🎧 ‘${profile.roleLabel}’ 뉴럴 AI 학습 목소리를 재생합니다."
-                    playFile(previewFile)
-                } else {
-                    tts?.let { voiceEngine.speak(phrase, profile, it, "test_phrase") }
-                    message = "‘${profile.roleLabel}’ 기기 TTS로 테스트 음성을 재생합니다."
-                }
+                voiceWorking = false
+                result.onSuccess { (text, wav) -> voiceStatus = "“$text”"; playFile(wav) }
+                    .onFailure { voiceStatus = "들어보기 실패: ${it.message ?: it.javaClass.simpleName}" }
+            }
+        }.start()
+    }
+
+    /** Training speed only (no audio or voice data), like the engine test report. */
+    private fun reportTraining(info: OnDeviceTrainer.Info) = runCatching {
+        val body = org.json.JSONObject()
+            .put("kind", "train")
+            .put("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+            .put("soc", if (android.os.Build.VERSION.SDK_INT >= 31) "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}" else android.os.Build.HARDWARE)
+            .put("app_version", packageManager.getPackageInfo(packageName, 0).versionName)
+            .put("threads", threads)
+            .put("steps", info.steps).put("train_ms", info.millis)
+            .put("first_loss", info.firstLoss.toDouble()).put("last_loss", info.lastLoss.toDouble())
+        val conn = java.net.URL("https://d32.org/api/voice/bench").openConnection() as java.net.HttpURLConnection
+        conn.requestMethod = "POST"; conn.doOutput = true; conn.connectTimeout = 10000
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.outputStream.use { it.write(body.toString().toByteArray()) }
+        conn.responseCode; conn.disconnect()
+    }
+
+    // ---------------------------------------------------------------- ⚙️ Settings
+
+    @Composable private fun SettingsTab() {
+        Text("설정", style = MaterialTheme.typography.headlineMedium)
+        OnDeviceBenchCard(enabled = !recording && !voiceWorking, playFile = { playFile(it) })
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("저장 공간", style = MaterialTheme.typography.titleMedium)
+                Text("미리 만들어 둔 책 음성을 지워요. 목소리와 모델은 그대로 있어요.", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = {
+                    stopReading()
+                    File(filesDir, "ondevice/books").deleteRecursively()
+                    voiceVersion++
+                    message = "만든 책 음성을 지웠어요."
+                }, enabled = !onDeviceBook.running) { Text("만든 책 음성 지우기") }
+            }
+        }
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("앱 정보", style = MaterialTheme.typography.titleMedium)
+                Text("버전 ${packageManager.getPackageInfo(packageName, 0).versionName}", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = { updater.checkOnLaunch(manual = true) }) { Text("업데이트 확인") }
             }
         }
     }
 
-    private fun readParagraphWithNeuralVoice(text: String, profile: VoiceProfile) {
-        stopAllAudio()
-        val tuningSig = "v${NEURAL_ENGINE_VERSION}_${profile.pitchOffsetHz}_${(profile.tau * 100).toInt()}_${(profile.warmthDb * 10).toInt()}_${profile.speedRate}"
-        val hash = (profile.roleKey + ":" + tuningSig + ":" + text).hashCode().toString().replace("-", "n")
-        val cacheFile = File(cacheDir, "story_${profile.roleKey.lowercase()}_$hash.mp3")
-
-        if (cacheFile.exists() && cacheFile.length() > 500) {
-            message = "❤️ ${profile.roleLabel} 뉴럴 AI 목소리로 읽어줍니다."
-            playFile(cacheFile)
-            return
-        }
-
-        message = "✨ ${profile.roleLabel} 뉴럴 AI 목소리로 문장 생성 중…"
-        executor.execute {
-            val ok = NeuralVoiceClient.synthesizeSpeech(text, profile, cacheFile)
-            runOnUiThread {
-                if (ok && cacheFile.exists()) {
-                    message = "❤️ ${profile.roleLabel} 뉴럴 AI 목소리로 읽어줍니다."
-                    playFile(cacheFile)
-                } else {
-                    tts?.let { voiceEngine.speak(text, profile, it) }
-                    message = "오프라인 상태이므로 기기 음성으로 재생합니다."
-                }
-            }
-        }
-    }
-
-    private fun openVoiceTuningDialog() {
-        tuningPitchOffset = currentProfile.pitchOffsetHz.toFloat()
-        tuningTau = currentProfile.tau
-        tuningWarmth = currentProfile.warmthDb
-        tuningSpeed = currentProfile.speedRate
-        tuningElevenKey = currentProfile.elevenLabsApiKey ?: ""
-        tuningUseEleven = currentProfile.useElevenLabs
-        showVoiceTuningDialog = true
-    }
-
-    private fun previewTunedVoice() {
-        isTuningPreviewLoading = true
-        val tempProfile = currentProfile.copy(
-            pitchOffsetHz = tuningPitchOffset.toInt(),
-            tau = tuningTau,
-            warmthDb = tuningWarmth,
-            speedRate = tuningSpeed,
-            elevenLabsApiKey = tuningElevenKey.trim().takeIf { it.isNotBlank() },
-            useElevenLabs = tuningUseEleven
-        )
-        executor.execute {
-            NeuralVoiceClient.tuneOnServer(tempProfile)
-            val previewFile = File(cacheDir, "preview_${tempProfile.roleKey.lowercase()}.mp3")
-            val ok = NeuralVoiceClient.downloadPreview("speaker_${tempProfile.roleKey.lowercase()}", previewFile)
-            runOnUiThread {
-                isTuningPreviewLoading = false
-                if (ok && previewFile.exists()) {
-                    message = "🎧 튜닝된 ‘${tempProfile.roleLabel}’ 뉴럴 목소리를 재생합니다."
-                    playFile(previewFile)
-                } else {
-                    message = "미리듣기 생성에 실패했습니다."
-                }
-            }
-        }
-    }
-
-    private fun saveTunedVoice() {
-        val updatedProfile = currentProfile.copy(
-            pitchOffsetHz = tuningPitchOffset.toInt(),
-            tau = tuningTau,
-            warmthDb = tuningWarmth,
-            speedRate = tuningSpeed,
-            elevenLabsApiKey = tuningElevenKey.trim().takeIf { it.isNotBlank() },
-            useElevenLabs = tuningUseEleven
-        )
-        if (speakerRole == SpeakerRole.MOTHER) {
-            motherProfile = updatedProfile
-            prefs.edit().putString("profile_MOTHER", updatedProfile.toJson()).apply()
-        } else {
-            fatherProfile = updatedProfile
-            prefs.edit().putString("profile_FATHER", updatedProfile.toJson()).apply()
-        }
-        executor.execute {
-            NeuralVoiceClient.tuneOnServer(updatedProfile)
-        }
-        showVoiceTuningDialog = false
-        message = "✅ ${updatedProfile.roleLabel} 맞춤 음색 튜닝이 저장되었습니다."
-    }
-
-    @Composable
-    private fun VoiceTuningDialog() {
-        AlertDialog(
-            onDismissRequest = { showVoiceTuningDialog = false },
-            title = {
-                Text("🎛️ ${currentProfile.roleLabel} 목소리 맞춤 튜닝", style = MaterialTheme.typography.titleLarge)
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Text(
-                        "실제 부모님 목소리와 더욱 똑같아지도록 음높이, 음색 복제 강도, 울림을 미세 조절합니다.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    // 1. Pitch
-                    Column {
-                        val pInt = tuningPitchOffset.toInt()
-                        val pDesc = if (pInt > 0) "+${pInt}Hz (더 맑고 높게)" else if (pInt < 0) "${pInt}Hz (더 낮고 묵직하게)" else "기본값 (0Hz)"
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("1. 음높이 미세 조절", style = MaterialTheme.typography.labelMedium)
-                            Text(pDesc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        }
-                        Slider(
-                            value = tuningPitchOffset,
-                            onValueChange = { tuningPitchOffset = it },
-                            valueRange = -40f..40f,
-                            steps = 15
-                        )
-                    }
-
-                    // 2. Tau (Neural Clone Resemblance)
-                    Column {
-                        val tauDesc = if (tuningTau >= 0.35f) "표현 풍부 (잡음 증가)" else if (tuningTau <= 0.2f) "깨끗함 (단조로움)" else "균형 (권장)"
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("2. 뉴럴 변환 표현 범위", style = MaterialTheme.typography.labelMedium)
-                            Text("${"%.2f".format(tuningTau)} - $tauDesc", style = MaterialTheme.typography.labelSmall, color = Color(0xFF673AB7))
-                        }
-                        Slider(
-                            value = tuningTau,
-                            onValueChange = { tuningTau = it },
-                            valueRange = 0.10f..0.40f
-                        )
-                    }
-
-                    // 3. Warmth / Resonance
-                    Column {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("3. 목소리 따뜻함 / 울림", style = MaterialTheme.typography.labelMedium)
-                            Text("${"%.1f".format(tuningWarmth)} dB", style = MaterialTheme.typography.labelSmall, color = Color(0xFF2E7D32))
-                        }
-                        Slider(
-                            value = tuningWarmth,
-                            onValueChange = { tuningWarmth = it },
-                            valueRange = -3.0f..6.0f
-                        )
-                    }
-
-                    // 4. Speed
-                    Column {
-                        Text("4. 낭독 속도", style = MaterialTheme.typography.labelMedium)
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            listOf("-12%" to "느리게", "-6%" to "포근함", "+0%" to "보통", "+6%" to "빠르게").forEach { (speedVal, label) ->
-                                val isSelected = tuningSpeed == speedVal
-                                OutlinedButton(
-                                    onClick = { tuningSpeed = speedVal },
-                                    modifier = Modifier.weight(1f),
-                                    colors = if (isSelected) ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primaryContainer) else ButtonDefaults.outlinedButtonColors(),
-                                    contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
-                                ) {
-                                    Text(label, fontSize = 11.sp)
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. ElevenLabs Option
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("초고화질 AI 복제 (ElevenLabs)", style = MaterialTheme.typography.labelMedium, color = Color(0xFFE65100))
-                                    Text("99% 실제 부모님 목소리와 동일한 음성 복제", style = MaterialTheme.typography.bodySmall, color = Color(0xFFBF360C))
-                                }
-                                Switch(
-                                    checked = tuningUseEleven,
-                                    onCheckedChange = { tuningUseEleven = it }
-                                )
-                            }
-                            if (tuningUseEleven) {
-                                OutlinedTextField(
-                                    value = tuningElevenKey,
-                                    onValueChange = { tuningElevenKey = it },
-                                    label = { Text("ElevenLabs API Key") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    placeholder = { Text("sk_...") }
-                                )
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = { saveTunedVoice() }) {
-                    Text("💾 저장 및 적용")
-                }
-            },
-            dismissButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { previewTunedVoice() },
-                        enabled = !isTuningPreviewLoading
-                    ) {
-                        Text(if (isTuningPreviewLoading) "생성 중…" else "🎧 미리듣기")
-                    }
-                    TextButton(onClick = { showVoiceTuningDialog = false }) {
-                        Text("닫기")
-                    }
-                }
-            }
-        )
-    }
+    // ---------------------------------------------------------------- audio
 
     private fun playFile(file: File, onComplete: (() -> Unit)? = null) {
         if (!file.exists()) return
@@ -1382,7 +664,7 @@ class MainActivity : ComponentActivity() {
                 p.setDataSource(file.absolutePath)
                 p.setOnCompletionListener {
                     it.release()
-                    player = null
+                    if (player === it) player = null
                     runOnUiThread { onComplete?.invoke() }
                 }
                 p.prepare()
@@ -1391,19 +673,14 @@ class MainActivity : ComponentActivity() {
         }.onFailure {
             player?.release()
             player = null
-            message = "녹음을 재생하지 못했습니다."
+            message = "소리를 재생하지 못했어요."
         }
     }
 
-    private fun resetAllRecordings() {
-        stopAllAudio()
-        voiceFile.delete()
-        (0 until totalSteps).forEach { stepVoiceFile(it).delete() }
-        stepRecorded = List(totalSteps) { false }
-        hasRecording = false
-        prefs.edit().remove("transcript").apply()
-        transcript = getFullDefaultScript(speakerRole)
-        message = "녹음이 삭제되었습니다."
+    private fun stopAllAudio() {
+        tts?.stop()
+        player?.release()
+        player = null
     }
 
     override fun onResume() {
@@ -1413,7 +690,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         if (recording) finishRecording()
-        stopAllAudio()
+        stopReading()
         super.onStop()
     }
 
