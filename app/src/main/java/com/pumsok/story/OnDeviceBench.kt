@@ -47,7 +47,7 @@ fun OnDeviceBenchCard(enabled: Boolean, playFile: (File) -> Unit) {
     val prefs = remember { context.getSharedPreferences("reader", Context.MODE_PRIVATE) }
     var bundleUrl by remember { mutableStateOf(prefs.getString("ondevice_bundle_url", "") ?: "") }
     var threads by remember { mutableIntStateOf(prefs.getInt("ondevice_threads", 6)) }
-    var accel by remember { mutableStateOf(prefs.getString("ondevice_accel", "cpu") ?: "cpu") }
+    var accel by remember { mutableStateOf((prefs.getString("ondevice_accel", "cpu") ?: "cpu").takeIf { it == "xnnpack" } ?: "cpu") }
     var running by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var status by remember { mutableStateOf("") }
@@ -82,7 +82,7 @@ fun OnDeviceBenchCard(enabled: Boolean, playFile: (File) -> Unit) {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("cpu" to "CPU", "xnnpack" to "XNNPACK", "nnapi" to "NNAPI").forEach { (key, label) ->
+                listOf("cpu" to "CPU", "xnnpack" to "XNNPACK (실험)").forEach { (key, label) ->
                     FilterChip(
                         selected = accel == key,
                         onClick = { accel = key },

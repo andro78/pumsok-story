@@ -38,6 +38,10 @@ object CrashReporter {
         runCatching {
             val prefs = context.getSharedPreferences("reader", Context.MODE_PRIVATE)
             val crumb = crumbFile(context).takeIf { it.exists() }?.readText()
+            // A crash while an accelerator was on: go back to the CPU provider and tell the user.
+            if (crumb != null && Regex("accel=(?!cpu)\\w+").containsMatchIn(crumb)) {
+                prefs.edit().putString("ondevice_accel", "cpu").putBoolean("accel_reset", true).apply()
+            }
             crashFile(context).takeIf { it.exists() }?.let { f ->
                 send(context, JSONObject().put("reason", "java").put("trace", f.readText()).put("breadcrumb", crumb))
                 f.delete()

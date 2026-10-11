@@ -206,9 +206,9 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir, acc
         buf.duplicate().apply { position(0); limit(count) }.slice()
 
     /**
-     * The SoVITS decoder is conv-heavy float32, so it may run faster on an accelerator: "xnnpack"
-     * (ARM NEON kernels, its own thread pool) or "nnapi". Falls back to the CPU provider if the
-     * provider is unavailable. GPT decoders are int8 and stay on the CPU provider.
+     * The SoVITS decoder is conv-heavy, so it may run faster with "xnnpack" (ARM NEON kernels,
+     * its own thread pool). Falls back to the CPU provider if the provider is unavailable.
+     * NNAPI was removed: it crashed natively (null dereference) on the int8 decoder on a Tab S11.
      */
     private fun vitsOptions(threads: Int, accel: String): OrtSession.SessionOptions? = runCatching {
         when (accel) {
@@ -216,11 +216,6 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir, acc
                 setIntraOpNumThreads(1)
                 addConfigEntry("session.intra_op.allow_spinning", "0")
                 addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            }
-            "nnapi" -> OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(threads)
-                addNnapi()
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             }
             else -> null

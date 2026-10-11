@@ -123,6 +123,7 @@ class MainActivity : ComponentActivity() {
         migrateRecordings()
         Speakers.migrateOldRecordings(this)
         consent = prefs.getBoolean("consent", false)
+        if (prefs.getString("ondevice_accel", "cpu") == "nnapi") prefs.edit().putString("ondevice_accel", "cpu").apply()
         refreshRecorded()
         readerVoice = prefs.getString("reader_voice", null) ?: defaultReaderVoice()
         tts = TextToSpeech(this) { status ->
@@ -189,6 +190,13 @@ class MainActivity : ComponentActivity() {
                                 else -> SettingsTab()
                             }
                             if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.primary)
+                            LaunchedEffect(Unit) {
+                                kotlinx.coroutines.delay(1500)  // reportPending runs in the background
+                                if (prefs.getBoolean("accel_reset", false)) {
+                                    prefs.edit().remove("accel_reset").apply()
+                                    message = "지난번 가속 설정에서 앱이 멈춰서 CPU로 되돌렸어요."
+                                }
+                            }
                         }
                     }
                 }
