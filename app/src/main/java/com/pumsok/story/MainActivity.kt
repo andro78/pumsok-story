@@ -782,7 +782,11 @@ class MainActivity : ComponentActivity() {
                     "녹음한 단계 문장 하나로 이 기기에서 바로 ${speakerRole.label} 목소리를 만들어요. 서버로 녹음을 보내지 않아요. 처음 한 번 기본 모델(약 600MB)을 내려받으니 Wi-Fi에서 해 주세요. 서버에서 학습한 목소리보다는 덜 닮을 수 있어요.",
                     style = MaterialTheme.typography.bodySmall
                 )
-                if (hasLocal) Text("✅ 기기에서 만든 ${speakerRole.label} 목소리가 있어요.", style = MaterialTheme.typography.labelMedium, color = Color(0xFF2E7D32))
+                val trained = remember(voiceVersion, role) { OnDeviceVoices.isTrained(this@MainActivity, role) }
+                if (hasLocal) Text(
+                    if (trained) "✅ 기기에서 학습까지 마친 ${speakerRole.label} 목소리가 있어요." else "✅ 기기에서 만든 ${speakerRole.label} 목소리가 있어요 (학습 전).",
+                    style = MaterialTheme.typography.labelMedium, color = Color(0xFF2E7D32)
+                )
                 if (voiceBuilding) LinearProgressIndicator(progress = { voiceBuildProgress }, modifier = Modifier.fillMaxWidth())
                 if (voiceBuildStatus.isNotBlank()) Text(voiceBuildStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -798,6 +802,19 @@ class MainActivity : ComponentActivity() {
                             Text("🎧 들어보기")
                         }
                     }
+                }
+                if (hasLocal) {
+                    Button(
+                        onClick = { trainOnDeviceVoice() },
+                        enabled = consent && recordedCount >= 4 && !voiceBuilding && !recording && !isTraining,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6A1B9A))
+                    ) {
+                        Text(if (trained) "🧠 기기에서 다시 학습하기 (실험)" else "🧠 기기에서 학습해 더 닮게 (실험)")
+                    }
+                    Text(
+                        "녹음한 문장 ${recordedCount}개로 이 기기에서 말투를 학습해요(${OnDeviceVoices.TRAIN_EPOCHS}회 반복). 몇 분에서 수십 분 걸리고 기기가 따뜻해질 수 있어요. 충전기를 꽂고 화면을 켜 둔 채로 해 주세요.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
                 if (recordedCount == 0) Text("위에서 단계별 문장을 하나 이상 녹음해 주세요.", style = MaterialTheme.typography.bodySmall)
                 else if (!consent) Text("목소리 사용 동의에 체크해 주세요.", style = MaterialTheme.typography.bodySmall)
@@ -828,6 +845,54 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread { voiceBuilding = false }
             }
         }.start()
+    }
+
+    private fun trainOnDeviceVoice() {
+        val role = speakerRole
+        val clips = (0 until totalSteps).map { stepVoiceFile(it) to getStepScript(it, role) }
+        voiceBuilding = true
+        voiceBuildProgress = 0f
+        voiceBuildStatus = "학습 준비 중…"
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Thread {
+            try {
+                val info = OnDeviceVoices.train(this, role.name, clips, prefs.getInt("ondevice_threads", 6)) { s, p ->
+                    runOnUiThread { voiceBuildStatus = s; voiceBuildProgress = p }
+                }
+                val minutes = info.millis / 60000f
+                runOnUiThread {
+                    voiceBuildStatus = "학습 완료: ${info.steps}단계, %.1f분 (손실 %.2f → %.2f). ‘들어보기’로 확인해 보세요.".format(minutes, info.firstLoss, info.lastLoss)
+                    voiceVersion++
+                }
+                reportTraining(role.name, info)
+            } catch (e: Throwable) {
+                runOnUiThread { voiceBuildStatus = "학습 실패: ${e.message ?: e.javaClass.simpleName}" }
+            } finally {
+                runOnUiThread {
+                    voiceBuilding = false
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        }.start()
+    }
+
+    /** Sends training speed (no audio, no voice data) to the bench log, like the engine test does. */
+    private fun reportTraining(role: String, info: OnDeviceTrainer.Info) {
+        runCatching {
+            val body = org.json.JSONObject()
+                .put("kind", "train")
+                .put("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+                .put("soc", if (android.os.Build.VERSION.SDK_INT >= 31) "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}" else android.os.Build.HARDWARE)
+                .put("app_version", packageManager.getPackageInfo(packageName, 0).versionName)
+                .put("threads", prefs.getInt("ondevice_threads", 6))
+                .put("steps", info.steps).put("train_ms", info.millis)
+                .put("first_loss", info.firstLoss.toDouble()).put("last_loss", info.lastLoss.toDouble())
+            val conn = java.net.URL("https://d32.org/api/voice/bench").openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "POST"; conn.doOutput = true; conn.connectTimeout = 10000
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            conn.responseCode; conn.disconnect()
+        }
     }
 
     /** Synthesizes one sample sentence with the voice built on this device and plays it. */

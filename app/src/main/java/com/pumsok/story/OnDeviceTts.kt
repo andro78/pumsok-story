@@ -42,6 +42,7 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : A
     private val ge: FloatArray
     private val geShape: LongArray
 
+    private val adapterTensors = mutableListOf<OnnxTensor>()
     private val encoder: OrtSession
     private val firstStage: OrtSession
     private val step: OrtSession
@@ -65,8 +66,21 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : A
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         }
         encoder = env.createSession(File(dir, "t2s_encoder.onnx").path, opts)
-        firstStage = env.createSession(File(dir, "t2s_fs2.onnx").path, opts)
-        step = env.createSession(File(dir, "t2s_step.onnx").path, opts)
+        // A voice fine-tuned on the device carries LoRA adapters; they replace the decoders'
+        // lora.* initializers (B ~ 0 in the bundle, i.e. no adapter).
+        val gptOpts = OnDeviceTrainer.readAdapters(voiceDir)?.let { adapters ->
+            OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(threads)
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                adapters.forEach { (name, value) ->
+                    val t = OnnxTensor.createTensor(env, FloatBuffer.wrap(value.first), value.second)
+                    adapterTensors += t
+                    addInitializer(name, t)
+                }
+            }
+        } ?: opts
+        firstStage = env.createSession(File(dir, "t2s_fs2.onnx").path, gptOpts)
+        step = env.createSession(File(dir, "t2s_step.onnx").path, gptOpts)
         vits = env.createSession(File(dir, "vits.onnx").path, opts)
         loadMs = System.currentTimeMillis() - t0
     }
@@ -194,6 +208,7 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : A
 
     override fun close() {
         encoder.close(); firstStage.close(); step.close(); vits.close()
+        adapterTensors.forEach { it.close() }
     }
 
     companion object {

@@ -12,8 +12,8 @@ android {
         applicationId = "com.pumsok.story"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.8.0"
+        versionCode = 18
+        versionName = "0.9.0-train-test"
         // ONNX Runtime ships ~35MB per ABI; real phones only need ARM.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
@@ -48,6 +48,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("org.jsoup:jsoup:1.18.3")
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
+    // Training build of ONNX Runtime (includes inference); its last release is 1.19.2.
+    implementation("com.microsoft.onnxruntime:onnxruntime-training-android:1.19.2")
     testImplementation("junit:junit:4.13.2")
 }
