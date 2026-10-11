@@ -27,7 +27,7 @@ import java.util.Random
  * [dir] holds the models; [voiceDir] holds voice.json + ge.bin. They are the same folder for a
  * server-made voice bundle, and differ for a voice built on the device on top of the base bundle.
  */
-class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : AutoCloseable {
+class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir, accel: String = "cpu") : AutoCloseable {
     class Result(val audio: FloatArray, val tokens: Int, val gptMs: Long, val vitsMs: Long)
 
     private val env = OrtEnvironment.getEnvironment()
@@ -81,7 +81,9 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : A
         } ?: opts
         firstStage = env.createSession(File(dir, "t2s_fs2.onnx").path, gptOpts)
         step = env.createSession(File(dir, "t2s_step.onnx").path, gptOpts)
-        vits = env.createSession(File(dir, "vits.onnx").path, opts)
+        val vitsPath = File(dir, "vits.onnx").path
+        vits = vitsOptions(threads, accel)?.let { runCatching { env.createSession(vitsPath, it) }.getOrNull() }
+            ?: env.createSession(vitsPath, opts)
         loadMs = System.currentTimeMillis() - t0
     }
 
@@ -202,6 +204,28 @@ class OnDeviceTts(private val dir: File, threads: Int, voiceDir: File = dir) : A
 
     private fun prefix(buf: FloatBuffer, count: Int): FloatBuffer =
         buf.duplicate().apply { position(0); limit(count) }.slice()
+
+    /**
+     * The SoVITS decoder is conv-heavy float32, so it may run faster on an accelerator: "xnnpack"
+     * (ARM NEON kernels, its own thread pool) or "nnapi". Falls back to the CPU provider if the
+     * provider is unavailable. GPT decoders are int8 and stay on the CPU provider.
+     */
+    private fun vitsOptions(threads: Int, accel: String): OrtSession.SessionOptions? = runCatching {
+        when (accel) {
+            "xnnpack" -> OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(1)
+                addConfigEntry("session.intra_op.allow_spinning", "0")
+                addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            }
+            "nnapi" -> OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(threads)
+                addNnapi()
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            }
+            else -> null
+        }
+    }.getOrNull()
 
     private fun longTensor(data: LongArray, shape: LongArray) =
         OnnxTensor.createTensor(env, LongBuffer.wrap(data), shape)

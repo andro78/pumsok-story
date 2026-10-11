@@ -83,7 +83,7 @@ class OnDeviceBook(private val context: Context) {
         val segments = loadPhonemes(story, d)
         status = "목소리 엔진을 불러오는 중…"
         val threads = prefs.getInt("ondevice_threads", 6)
-        OnDeviceTts(bundleDir, threads, sel.voiceDir ?: bundleDir).use { tts ->
+        OnDeviceTts(bundleDir, threads, sel.voiceDir ?: bundleDir, prefs.getString("ondevice_accel", "cpu") ?: "cpu").use { tts ->
             var audioSec = 0f
             var workSec = 0f
             var made = 0

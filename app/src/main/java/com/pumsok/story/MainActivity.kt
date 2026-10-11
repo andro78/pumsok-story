@@ -597,7 +597,7 @@ class MainActivity : ComponentActivity() {
                 val sample = JSONArray(File(baseDir, "bench.json").readText()).getJSONObject(0)
                 val phones = sample.getJSONArray("phones").let { a -> LongArray(a.length()) { a.getLong(it) } }
                 val wav = File(cacheDir, "voice_preview.wav")
-                OnDeviceTts(baseDir, threads, OnDeviceVoices.localDir(this, r.name)).use { t ->
+                OnDeviceTts(baseDir, threads, OnDeviceVoices.localDir(this, r.name), prefs.getString("ondevice_accel", "cpu") ?: "cpu").use { t ->
                     OnDeviceTts.writeWav(wav, t.synthesize(phones).audio, t.sampleRate)
                 }
                 sample.getString("text") to wav

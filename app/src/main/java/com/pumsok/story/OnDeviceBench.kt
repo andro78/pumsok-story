@@ -46,7 +46,8 @@ fun OnDeviceBenchCard(enabled: Boolean, playFile: (File) -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("reader", Context.MODE_PRIVATE) }
     var bundleUrl by remember { mutableStateOf(prefs.getString("ondevice_bundle_url", "") ?: "") }
-    var threads by remember { mutableIntStateOf(prefs.getInt("ondevice_threads", 4)) }
+    var threads by remember { mutableIntStateOf(prefs.getInt("ondevice_threads", 6)) }
+    var accel by remember { mutableStateOf(prefs.getString("ondevice_accel", "cpu") ?: "cpu") }
     var running by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var status by remember { mutableStateOf("") }
@@ -80,13 +81,25 @@ fun OnDeviceBenchCard(enabled: Boolean, playFile: (File) -> Unit) {
                     )
                 }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("cpu" to "CPU", "xnnpack" to "XNNPACK", "nnapi" to "NNAPI").forEach { (key, label) ->
+                    FilterChip(
+                        selected = accel == key,
+                        onClick = { accel = key },
+                        label = { Text(label) },
+                        enabled = !running
+                    )
+                }
+            }
+            Text("스레드와 가속 설정은 책 만들기와 들어보기에도 그대로 쓰여요.", style = MaterialTheme.typography.bodySmall)
             Button(
                 onClick = {
-                    prefs.edit().putString("ondevice_bundle_url", bundleUrl).putInt("ondevice_threads", threads).apply()
+                    prefs.edit().putString("ondevice_bundle_url", bundleUrl).putInt("ondevice_threads", threads)
+                        .putString("ondevice_accel", accel).apply()
                     running = true
                     rows.clear()
                     Thread {
-                        runBench(context, bundleUrl, threads,
+                        runBench(context, bundleUrl, threads, accel,
                             onStatus = { s, p -> status = s; progress = p },
                             onRow = { rows += it })
                         running = false
@@ -120,6 +133,7 @@ private fun runBench(
     context: Context,
     bundleUrl: String,
     threads: Int,
+    accel: String,
     onStatus: (String, Float) -> Unit,
     onRow: (BenchRow) -> Unit,
 ) {
@@ -129,7 +143,7 @@ private fun runBench(
         OnDeviceTts.download(bundleUrl, dir) { name, p -> onStatus("모델 내려받는 중… $name (${(p * 100).toInt()}%)", p) }
         onStatus("모델을 불러오는 중…", 1f)
         val bench = JSONArray(File(dir, "bench.json").readText())
-        OnDeviceTts(dir, threads).use { tts ->
+        OnDeviceTts(dir, threads, accel = accel).use { tts ->
             for (i in 0 until bench.length()) {
                 val item = bench.getJSONObject(i)
                 val phonesJson = item.getJSONArray("phones")
@@ -144,7 +158,7 @@ private fun runBench(
                     .put("audio_sec", row.audioSec.toDouble()).put("rtf", row.rtf.toDouble()))
             }
             val avg = (0 until results.length()).map { results.getJSONObject(it).getDouble("rtf") }.average()
-            report(context, JSONObject(File(dir, "manifest.json").readText()).optString("bundle_id"), threads, tts.loadMs, results)
+            report(context, JSONObject(File(dir, "manifest.json").readText()).optString("bundle_id"), threads, accel, tts.loadMs, results)
             onStatus("완료 · 평균 RTF %.2f (1 이하면 실시간보다 빨라요) · 결과를 서버로 보냈어요".format(avg), 1f)
         }
     } catch (e: Throwable) {
@@ -152,7 +166,7 @@ private fun runBench(
     }
 }
 
-private fun report(context: Context, bundleId: String, threads: Int, loadMs: Long, results: JSONArray) {
+private fun report(context: Context, bundleId: String, threads: Int, accel: String, loadMs: Long, results: JSONArray) {
     val body = JSONObject()
         .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
         .put("soc", if (Build.VERSION.SDK_INT >= 31) "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}" else Build.HARDWARE)
@@ -160,6 +174,7 @@ private fun report(context: Context, bundleId: String, threads: Int, loadMs: Lon
         .put("app_version", context.packageManager.getPackageInfo(context.packageName, 0).versionName)
         .put("bundle", bundleId)
         .put("threads", threads)
+        .put("accel", accel)
         .put("load_ms", loadMs)
         .put("results", results)
     runCatching {
